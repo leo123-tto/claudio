@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>Claudio</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Doto:wght@400;600;800&family=Space+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css?v=6" />
+  </head>
+  <body>
+    <div class="bg-glow" id="bgGlow"></div>
+    <div class="meteors" aria-hidden="true"></div>
+    <div class="cursor-glow" id="cursorGlow"></div>
+    <div class="spotlight" id="spotlight"></div>
+    <div class="frame">
+      <!-- 顶栏 -->
+      <header class="topbar">
+        <div class="brand">
+          <img class="avatar" src="/mascot.png" alt="Claudio" title="点我看 Claudio 记得关于你的事" />
+          <span class="logo">Claudio</span>
+        </div>
+        <div class="top-actions">
+          <button class="pill settings-toggle" id="settingsBtn" title="模型与推荐设置">⚙</button>
+          <button class="pill mini-toggle" id="miniBtn" title="迷你模式（缩小成小窗）">▽</button>
+          <button class="fish-credit" id="fishCredit" title="Fish Audio 余额 · 点击去充值">
+            <span class="fc-dot"></span><span class="fc-label">FISH</span><span class="fc-val" id="fishCreditVal">—</span>
+          </button>
+          <div class="seg">
+            <button class="seg-btn active" data-theme-btn="dark">DARK</button>
+            <button class="seg-btn" data-theme-btn="light">LIGHT</button>
+          </div>
+        </div>
+      </header>
+
+      <!-- 时钟面板 -->
+      <section class="clock-panel">
+        <canvas class="clock-canvas" id="clockCanvas"></canvas>
+        <canvas class="wave-big" id="waveBig"></canvas>
+        <div class="date-line">
+          <span class="weekday" id="weekday">—</span>
+          <span class="date" id="date">— · — · —</span>
+          <span class="onair"><span class="dot"></span> ON AIR</span>
+        </div>
+      </section>
+
+      <!-- 播放器控制栏 -->
+      <section class="player">
+        <div class="now-mini">
+          <div class="now-text">
+            <div class="now-title" id="nowTitle">— · —</div>
+            <div class="now-state" id="nowState">PRESS ▶ TO START</div>
+          </div>
+        </div>
+        <div class="controls">
+          <div class="transport">
+            <button class="ctrl" id="prevBtn" title="上一段">⏮</button>
+            <button class="ctrl ctrl-main" id="playBtn" title="播放/暂停">▶</button>
+            <button class="ctrl" id="nextBtn" title="下一首/换一首">⏭</button>
+            <button class="ctrl" id="stopBtn" title="停止">⏹</button>
+            <button class="ctrl" id="dislikeBtn" title="不喜欢这首，以后少推荐">⊘</button>
+            <button class="ctrl" id="favBtn" title="收藏这首">♡</button>
+          </div>
+          <div class="vol">
+            <span class="vol-label">VOL</span>
+            <input type="range" id="vol" min="0" max="100" value="100" />
+            <button class="ctrl airplay" id="airplayBtn" title="投放到 AirPlay 音箱">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-1"/><path d="M12 15l5 6H7l5-6z" fill="currentColor" stroke="none"/></svg>
+            </button>
+          </div>
+          <!-- 迷你模式下显示当前歌词一行（全窗模式隐藏） -->
+          <div class="mini-lyric" id="miniLyric"></div>
+        </div>
+      </section>
+
+      <!-- 进度 -->
+      <div class="progress">
+        <span class="t" id="curTime">0:00</span>
+        <div class="bar" id="bar"><div class="bar-fill" id="barFill"></div></div>
+        <span class="t" id="durTime">0:00</span>
+      </div>
+
+      <!-- QUEUE 头 -->
+      <div class="queue-head">
+        <span>QUEUE</span>
+        <span id="queueCount">0 TRACKS</span>
+      </div>
+
+      <!-- 直播 / 播报区 -->
+      <section class="live">
+        <div class="live-head">
+          <span class="live-name"><span class="dot"></span> Claudio</span>
+          <span class="live-tag" id="liveTag">OFFLINE</span>
+        </div>
+        <div class="live-conn" id="connMsg">Connecting to Claudio server…</div>
+        <div id="stream" class="stream"></div>
+        <div class="now-playing" id="nowPlaying"></div>
+      </section>
+
+      <!-- 输入栏 -->
+      <div class="composer">
+        <input id="moodInput" placeholder="跟 DJ 说点什么…（回车发送）" />
+        <button class="mic" id="sleepBtn" title="睡眠定时 30 分钟"><img class="sleep-icon" src="/sleep.png" alt="睡眠" /><span class="sleep-badge" id="sleepBadge"></span></button>
+        <button class="send" id="sendBtn" title="发送">↑</button>
+      </div>
+
+      <!-- 底栏 -->
+      <footer class="footbar">
+        <span>CLAUDIO FM</span>
+        <span id="connState">CONNECTING…</span>
+      </footer>
+    </div>
+
+    <div class="settings-backdrop hidden" id="settingsBackdrop" aria-hidden="true">
+      <section class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <header class="settings-head">
+          <div>
+            <span class="settings-kicker">CLAUDIO CONTROL</span>
+            <h2 id="settingsTitle">设置</h2>
+          </div>
+          <button class="settings-close" id="settingsClose" aria-label="关闭设置">×</button>
+        </header>
+
+        <div class="settings-group">
+          <label for="providerSelect">大模型</label>
+          <select id="providerSelect">
+            <option value="codex">ChatGPT（订阅）</option>
+            <option value="claude">Claude（订阅）</option>
+            <option value="deepseek">DeepSeek（API）</option>
+          </select>
+          <div class="settings-hint" id="providerHint">默认使用速度和质量平衡的 GPT-5.6 Luna</div>
+        </div>
+
+        <div class="provider-settings" id="codexSettings">
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label for="modelSelect">ChatGPT 模型</label>
+              <select id="modelSelect">
+                <option value="gpt-5.6-luna">Luna · 快速平衡</option>
+                <option value="gpt-5.6-terra">Terra · 更高质量</option>
+                <option value="gpt-5.6-sol">Sol · 最高质量</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="effortSelect">思考强度</label>
+              <select id="effortSelect">
+                <option value="low">低 · 速度优先</option>
+                <option value="medium">中 · 更细致</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="provider-settings hidden" id="claudeSettings">
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label for="claudeAccessSelect">接入方式</label>
+              <select id="claudeAccessSelect" disabled>
+                <option value="subscription">Claude 订阅 · 本机登录</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="claudeModelSelect">Claude 模型</label>
+              <select id="claudeModelSelect">
+                <option value="sonnet">Sonnet · 速度质量平衡</option>
+                <option value="opus">Opus · 质量优先</option>
+              </select>
+            </div>
+          </div>
+          <div class="settings-hint">使用接收方电脑上的 Claude 订阅登录，不会读取或传输订阅凭据。</div>
+        </div>
+
+        <div class="provider-settings hidden" id="deepseekSettings">
+          <div class="settings-group">
+            <label for="deepseekModelSelect">DeepSeek 模型</label>
+            <select id="deepseekModelSelect">
+              <option value="deepseek-v4-flash">V4 Flash · 更快更省</option>
+              <option value="deepseek-v4-pro">V4 Pro · 质量优先</option>
+            </select>
+          </div>
+          <div class="settings-group">
+            <label for="deepseekApiKey">DeepSeek API Key</label>
+            <input id="deepseekApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="填写后保存在本机" />
+            <div class="settings-hint" id="deepseekKeyHint">密钥不会在设置接口中回显。</div>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <label for="recommendationSelect">推荐方式</label>
+          <select id="recommendationSelect">
+            <option value="discovery">发现 · 65% 同风格小众 + 25% 边界探索</option>
+            <option value="balanced">平衡 · 新鲜与熟悉各占一半</option>
+            <option value="familiar">熟悉 · 以常听风格为主</option>
+          </select>
+          <div class="settings-hint">收藏歌只作口味锚点；“发现”模式默认不直接播放收藏原曲。</div>
+        </div>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div><span class="settings-section-title">我的口味曲库</span><span class="settings-badge" id="favoritesCount">读取中</span></div>
+          </div>
+          <div class="settings-group">
+            <label for="favoritePlaylistInput">导入网易云歌单</label>
+            <input id="favoritePlaylistInput" type="text" autocomplete="off" spellcheck="false" placeholder="粘贴歌单链接或歌单 ID" />
+            <div class="settings-hint">导入后只作为口味分析和小众挖掘参考；重复歌曲自动跳过。私密歌单需先设为公开，或在本机配置网易云登录 Cookie。</div>
+          </div>
+          <div class="settings-actions compact-actions">
+            <button class="settings-secondary" id="importFavoritesBtn">导入并合并</button>
+          </div>
+          <div class="settings-result" id="favoritesImportResult">每台电脑都有独立曲库，分享 App 不会带上你的个人歌单。</div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div><span class="settings-section-title">Fish Audio 语音</span><span class="settings-badge">固定启用</span></div>
+            <span class="settings-hint" id="fishKeyStatus">未配置</span>
+          </div>
+          <div class="settings-group">
+            <label for="fishApiKey">Fish API Key</label>
+            <input id="fishApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="填写后保存在本机" />
+          </div>
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label for="fishModelSelect">语音模型</label>
+              <select id="fishModelSelect">
+                <option value="s1">S1 · 速度优先</option>
+                <option value="s2-pro">S2-Pro · 官方推荐</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="fishVoiceId">音色 ID</label>
+              <input id="fishVoiceId" type="text" autocomplete="off" spellcheck="false" placeholder="Fish voice / reference ID" />
+            </div>
+          </div>
+          <div class="settings-actions compact-actions">
+            <button class="settings-secondary" id="testFishBtn">保存并测试语音</button>
+          </div>
+          <div class="settings-result" id="fishTestResult">测试会生成一句短口播，并直接试听。</div>
+          <audio class="fish-preview hidden" id="fishPreview" controls preload="none"></audio>
+        </section>
+
+        <div class="settings-actions">
+          <button class="settings-secondary" id="testModelBtn">保存并测速</button>
+          <button class="settings-primary" id="saveSettingsBtn">保存设置</button>
+        </div>
+        <div class="settings-result" id="settingsResult">切换后从下一次推荐开始生效。</div>
+
+        <div class="memory-card">
+          <div class="memory-card-head"><span>Claudio 正在学到什么</span><button id="refreshProfileBtn">刷新</button></div>
+          <div id="profileSummary" class="profile-summary">正在读取…</div>
+        </div>
+        <div class="settings-footnote">API Key 只保存在当前电脑的本地忽略目录，界面和接口均不回显。语音固定使用 Fish Audio；失败会明确提示，不会自动切换到 macOS 本地语音。</div>
+      </section>
+    </div>
+
+    <script src="/app.js?v=9" type="module"></script>
+  </body>
+</html>

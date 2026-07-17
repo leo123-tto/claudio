@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claudio 正在启动</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: #edf7f1; background: #070b09; }
+      main { width: min(320px, 80vw); text-align: center; }
+      .mark { width: 72px; height: 72px; margin: 0 auto 24px; border: 1px solid #1d4735; border-radius: 22px; display: grid; place-items: center; color: #00e08a; font: 700 28px/1 monospace; box-shadow: 0 0 44px rgba(0,224,138,.12); }
+      h1 { margin: 0; font-size: 22px; letter-spacing: .04em; }
+      p { margin: 12px 0 0; color: #829087; font-size: 13px; line-height: 1.7; }
+      .bar { height: 2px; margin: 28px auto 0; overflow: hidden; background: #17231d; border-radius: 999px; }
+      .bar::after { content: ""; display: block; width: 38%; height: 100%; background: #00e08a; animation: move 1.15s ease-in-out infinite alternate; }
+      @keyframes move { from { transform: translateX(-15%); } to { transform: translateX(180%); } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">C</div>
+      <h1>正在唤醒 Claudio</h1>
+      <p id="status">第一次打开会多等几秒，音乐服务和 AI 大脑正在就位。</p>
+      <div class="bar" id="progress"></div>
+    </main>
+  </body>
+</html>

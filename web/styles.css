@@ -1,0 +1,512 @@
+/* ── Claudio · Nothing 风格 ── */
+:root {
+  --font-dot: "Doto", "Space Mono", ui-monospace, monospace;
+  --font-mono: "Space Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-cn: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --accent: #00e08a;
+}
+
+[data-theme="dark"] {
+  --bg: #000;
+  --fg: #f4f4f4;
+  --dim: #6a6a6a;
+  --dim2: #3a3a3a;
+  --panel: #070707;
+  --panel-edge: #1c1c1c;
+  --bubble: #f4f4f4;
+  --bubble-fg: #000;
+  --dot-grid: rgba(255, 255, 255, 0.07);
+}
+[data-theme="light"] {
+  --bg: #f3f3f3;
+  --fg: #0a0a0a;
+  --dim: #8a8a8a;
+  --dim2: #cfcfcf;
+  --panel: #fbfbfb;
+  --panel-edge: #e2e2e2;
+  --bubble: #0a0a0a;
+  --bubble-fg: #fff;
+  --dot-grid: rgba(0, 0, 0, 0.08);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  height: 100vh;
+}
+body {
+  background-image: radial-gradient(circle, var(--dot-grid) 1px, transparent 1px);
+  background-size: 22px 22px;
+  position: relative;
+  overflow: hidden; /* 整页不滚动：固定一屏，只中间对话区 .stream 内部滚 */
+  isolation: isolate; /* 关键：让 body 成为堆叠上下文，z-index:-1/-2 的光晕/流星/聚光不再被埋在 body 不透明背景之下 */
+}
+.bg-glow {
+  position: fixed; inset: -20%; z-index: -2; pointer-events: none;
+  background:
+    radial-gradient(42vw 42vw at 18% 20%, rgba(0, 224, 138, 0.24), transparent 62%),
+    radial-gradient(50vw 50vw at 82% 74%, rgba(70, 110, 255, 0.20), transparent 60%),
+    radial-gradient(38vw 38vw at 62% 42%, rgba(255, 70, 130, 0.14), transparent 60%);
+  filter: blur(46px);
+  animation: glow-move 16s ease-in-out infinite alternate;
+}
+/* 第二层光晕，反向慢飘，和主层交错流动 → 背景"活"起来不再死板 */
+.bg-glow::after {
+  content: ''; position: absolute; inset: 0;
+  background:
+    radial-gradient(30vw 30vw at 72% 24%, rgba(0, 224, 138, 0.15), transparent 60%),
+    radial-gradient(34vw 34vw at 24% 80%, rgba(120, 90, 255, 0.14), transparent 60%);
+  animation: glow-move2 23s ease-in-out infinite alternate;
+}
+[data-theme="light"] .bg-glow { opacity: 0.5; }
+@keyframes glow-move {
+  0%   { transform: translate(-6%, -4%) scale(1); }
+  25%  { transform: translate(5%, -6%) scale(1.1); }
+  50%  { transform: translate(8%, 5%) scale(1.16); }
+  75%  { transform: translate(-4%, 7%) scale(1.08); }
+  100% { transform: translate(6%, 3%) scale(1.04); }
+}
+@keyframes glow-move2 {
+  0%   { transform: translate(5%, 4%) scale(1.05); }
+  50%  { transform: translate(-7%, -3%) scale(1); }
+  100% { transform: translate(4%, -6%) scale(1.12); }
+}
+
+/* 流星：克制的两条 accent 细线，长间隔斜划过夜空（reduced-motion / 迷你模式关闭） */
+.meteors { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
+.meteors::before, .meteors::after {
+  content: ''; position: absolute; left: -14%;
+  width: 190px; height: 1.8px;
+  background: linear-gradient(90deg, transparent, rgba(0, 224, 138, 0.85), transparent);
+  filter: blur(0.4px); transform: rotate(-22deg); opacity: 0;
+}
+/* 放到画面中下部的开阔透明区（避开顶部不透明的时钟面板，否则只能从边缝里露一道）；轨迹压平，在可见带里多停留 */
+.meteors::before { top: 44%; animation: meteor 7s ease-in 1.5s infinite; }
+.meteors::after { top: 64%; animation: meteor 10.5s ease-in 5s infinite; }
+@keyframes meteor {
+  0%   { opacity: 0; transform: translate(0, 0) rotate(-22deg); }
+  6%   { opacity: 1; }
+  30%  { opacity: 0; }
+  100% { opacity: 0; transform: translate(122vw, 26vh) rotate(-22deg); }
+}
+
+.frame {
+  max-width: 680px;
+  margin: 0 auto;
+  height: 100vh;            /* 固定一屏高，内部 flex 分配，只 .stream 滚动；上下都固定 */
+  padding: 14px 18px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+/* ── 迷你模式：一行 = 播放/暂停 + 下一首 + 当前歌词 + 展开(△)，配整窗呼吸绿光边框 ── */
+.mini-toggle { font-size: 11px; }
+body.mini .frame {
+  min-height: 0; padding: 14px 18px; gap: 0; justify-content: center;
+  box-shadow: inset 0 0 0 1px rgba(0, 224, 138, 0.32), inset 0 0 18px rgba(0, 224, 138, 0.12);
+  animation: mini-edge 3.4s ease-in-out infinite; /* 边缘绿光呼吸，做点背景点缀 */
+}
+@keyframes mini-edge {
+  0%, 100% { box-shadow: inset 0 0 0 1px rgba(0, 224, 138, 0.26), inset 0 0 14px rgba(0, 224, 138, 0.10); }
+  50%      { box-shadow: inset 0 0 0 1px rgba(0, 224, 138, 0.55), inset 0 0 30px rgba(0, 224, 138, 0.26); }
+}
+/* 只留：播放/暂停 + 下一首 + 当前歌词 + 展开按钮，其余（含歌名行 now-mini）全部隐藏 */
+body.mini .clock-panel,
+body.mini .progress,
+body.mini .queue-head,
+body.mini .live,
+body.mini .composer,
+body.mini .footbar,
+body.mini .vol,
+body.mini .seg,
+body.mini .fish-credit,
+body.mini .avatar,
+body.mini .logo,
+body.mini .now-mini,
+body.mini #prevBtn,
+body.mini #stopBtn,
+body.mini #dislikeBtn,
+body.mini #favBtn,
+body.mini #settingsBtn,
+body.mini .bg-glow,
+body.mini .cursor-glow,
+body.mini .spotlight,
+body.mini .meteors { display: none; }
+/* △ 展开按钮浮到右上角，不占布局 */
+body.mini .topbar { position: absolute; top: 12px; right: 14px; width: auto; gap: 0; z-index: 2; }
+body.mini .top-actions { gap: 0; }
+/* 一行：按钮靠左成组，当前歌词占满右边 */
+body.mini .player { gap: 0; }
+body.mini .controls { justify-content: flex-start; gap: 14px; }
+body.mini .transport { flex: 0 0 auto; gap: 14px; justify-content: flex-start; }
+body.mini .ctrl { width: 40px; height: 40px; font-size: 13px; }
+body.mini .ctrl-main { width: 46px; height: 46px; font-size: 15px; }
+body.mini .mini-lyric {
+  display: block; flex: 1; min-width: 0;
+  font-family: var(--font-cn); font-size: 14px; line-height: 1.4;
+  color: var(--accent); text-shadow: 0 0 10px rgba(0, 224, 138, 0.5);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding-right: 30px; /* 给右上角 △ 让位 */
+}
+
+/* 标签通用：等宽大写 */
+.pill, .seg-btn, .vol-label, .queue-head, .live-tag, .onair, .now-state, .footbar, .live-name {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+
+/* ── 顶栏 ── */
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.avatar {
+  width: 30px; height: 30px;
+  border: 1px solid var(--panel-edge); border-radius: 50%;
+  object-fit: cover; display: block;
+  cursor: pointer; transition: border-color .15s, box-shadow .15s, transform .15s;
+}
+.avatar:hover { border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 224, 138, 0.3); transform: scale(1.06); }
+.logo {
+  font-family: var(--font-dot);
+  font-weight: 800;
+  font-size: 26px;
+  letter-spacing: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.top-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.pill {
+  background: transparent; color: var(--fg);
+  border: 1px solid var(--panel-edge); border-radius: 7px;
+  padding: 6px 13px; font-size: 11px; cursor: pointer;
+}
+
+/* Fish 余额小组件：点一下跳转充值页（余额低于阈值变红提醒） */
+.fish-credit {
+  display: flex; align-items: center; gap: 6px;
+  background: transparent; color: var(--fg);
+  border: 1px solid var(--panel-edge); border-radius: 7px;
+  padding: 6px 11px; font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: 1px; cursor: pointer; white-space: nowrap;
+}
+.fish-credit .fc-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.fish-credit .fc-label { color: var(--dim); text-transform: uppercase; }
+.fish-credit .fc-val { font-weight: 700; font-variant-numeric: tabular-nums; }
+.fish-credit:hover { border-color: var(--accent); box-shadow: 0 0 12px rgba(0, 224, 138, 0.28); }
+.fish-credit.low { border-color: #ff4d6d; }
+.fish-credit.low .fc-dot { background: #ff4d6d; box-shadow: 0 0 8px #ff4d6d; animation: dot-breathe 1.4s ease-in-out infinite; }
+.fish-credit.low .fc-val { color: #ff4d6d; }
+
+.seg { display: flex; border: 1px solid var(--panel-edge); border-radius: 7px; overflow: hidden; }
+.seg-btn {
+  background: transparent; color: var(--dim); border: none;
+  padding: 7px 16px; font-size: 11px; cursor: pointer;
+}
+.seg-btn.active { background: var(--fg); color: var(--bg); }
+
+/* ── 时钟面板 ── */
+.clock-panel {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 14px;
+  padding: 12px 18px 10px;
+  text-align: center;
+  background-image: radial-gradient(circle, var(--dot-grid) 1px, transparent 1px);
+  background-size: 15px 15px;
+}
+.clock-canvas {
+  display: block;
+  width: 100%;
+  max-width: 470px;
+  height: 72px;
+  margin: 0 auto;
+  cursor: crosshair;
+}
+.date-line { margin-top: 4px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.weekday { font-family: var(--font-dot); font-weight: 600; font-size: 14px; letter-spacing: 5px; color: var(--fg); }
+.date { font-family: var(--font-dot); font-size: 12px; color: var(--dim); letter-spacing: 5px; }
+.onair { font-size: 11px; color: var(--accent); display: flex; align-items: center; gap: 7px; margin-top: 4px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); display: inline-block; box-shadow: 0 0 8px var(--accent); animation: dot-breathe 2.4s ease-in-out infinite; }
+@keyframes dot-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 9px var(--accent); }
+  50% { opacity: 0.45; transform: scale(0.7); box-shadow: 0 0 3px var(--accent); }
+}
+
+/* ── 播放器栏 ── */
+.player {
+  display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+}
+.controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.now-mini { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.wave-big { display: block; width: 100%; height: 42px; margin: 4px auto 0; }
+.now-title { font-family: var(--font-cn); font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px; }
+.now-state { font-size: 9px; color: var(--dim); margin-top: 2px; }
+.transport { display: flex; align-items: center; gap: 9px; }
+.ctrl {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: transparent; color: var(--fg);
+  border: 1px solid var(--panel-edge); cursor: pointer;
+  font-size: 11px; display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.ctrl:hover { border-color: var(--accent); }
+.ctrl-main { background: var(--fg); color: var(--bg); border: none; width: 32px; height: 32px; font-size: 12px; }
+.ctrl.fav-on { color: var(--accent); border-color: var(--accent); }
+.ctrl.dislike-on { color: #ff5d73; border-color: #ff5d73; box-shadow: 0 0 12px rgba(255, 93, 115, 0.3); }
+.vol { display: flex; align-items: center; gap: 8px; }
+.vol-label { font-size: 10px; color: var(--dim); }
+.vol input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 64px; height: 3px; background: var(--dim2); border-radius: 2px; outline: none;
+}
+.vol input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 4px; height: 14px; border-radius: 1px; background: var(--accent); cursor: pointer; box-shadow: 0 0 6px var(--accent);
+}
+/* AirPlay 投放按钮：音量右侧的小圆钮（沿用 .ctrl 样式），正在投放时高亮 */
+.airplay { padding: 0; flex: 0 0 auto; }
+.airplay svg { width: 15px; height: 15px; display: block; }
+.airplay.casting { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 12px rgba(0, 224, 138, 0.4); }
+/* 迷你窗当前歌词行：全窗模式不显示，仅迷你模式显示（见 body.mini .mini-lyric） */
+.mini-lyric { display: none; }
+
+/* ── 进度 ── */
+.progress { display: flex; align-items: center; gap: 12px; }
+.t { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+/* 进度条：Nothing 风 —— 直角细线 + accent 填充 + 末端竖块指示器 */
+.bar { flex: 1; height: 2px; background: var(--dim2); cursor: pointer; position: relative; }
+.bar-fill { height: 100%; width: 0; background: var(--accent); position: relative; }
+.bar-fill::after { content: ''; position: absolute; right: 0; top: 50%; transform: translate(50%, -50%); width: 3px; height: 11px; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+/* ── QUEUE 头 ── */
+.queue-head {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--dim);
+  padding-bottom: 6px; border-bottom: 1px solid var(--panel-edge);
+}
+
+/* ── 直播 / 播报 ── */
+.live { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.live-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.live-name { font-family: var(--font-dot); font-size: 15px; letter-spacing: 2px; display: flex; align-items: center; gap: 8px; }
+.live-tag { font-size: 10px; color: var(--dim); }
+.live-tag.on { color: var(--accent); }
+.live-conn { text-align: center; font-size: 10px; color: var(--dim2); letter-spacing: 1px; margin-bottom: 8px; }
+.stream { flex: 1; overflow-y: auto; scroll-behavior: smooth; min-height: 0; }
+.stream::-webkit-scrollbar { width: 0; }
+
+.line { margin-bottom: 16px; }
+.line .who { font-family: var(--font-mono); font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 6px; display: block; }
+.bubble {
+  font-family: var(--font-cn); font-size: 16px; line-height: 1.65;
+  background: var(--bubble); color: var(--bubble-fg);
+  padding: 14px 16px; border-radius: 12px; opacity: 0.55; transition: opacity 0.25s;
+}
+.line.active .bubble { opacity: 1; }
+/* 口播打字机光标：逐字出时尾部闪烁竖条（reduced-motion 下静止） */
+.bubble.typing::after { content: '▌'; color: var(--accent); margin-left: 1px; animation: caretBlink 1s step-end infinite; }
+@keyframes caretBlink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .bubble.typing::after { animation: none; } }
+.line.active .who { color: var(--accent); }
+.line.song .who { color: var(--accent); }
+.lyric { font-family: var(--font-cn); font-size: 15px; line-height: 1.9; color: var(--dim); padding: 4px 2px; }
+.lyric .lyric-line {
+  transition: color 0.45s, opacity 0.45s, transform 0.45s, text-shadow 0.45s;
+  transform: scale(0.98);
+  transform-origin: left center;
+  padding: 3px 0;
+}
+.lyric .lyric-line.active {
+  color: var(--fg);
+  transform: scale(1.06);
+  /* 多层荧光叠加，正在播的那句更亮、更显眼（之前基本看不清）*/
+  text-shadow:
+    0 0 6px rgba(0, 224, 138, 0.95),
+    0 0 16px rgba(0, 224, 138, 0.8),
+    0 0 32px rgba(0, 224, 138, 0.5);
+}
+.now-playing { text-align: center; font-size: 10px; color: var(--dim); letter-spacing: 1px; margin-top: 10px; text-transform: uppercase; }
+
+/* ── 输入栏 ── */
+.composer { display: flex; align-items: center; gap: 10px; }
+.composer input {
+  flex: 1; background: var(--panel); color: var(--fg);
+  border: 1px solid var(--panel-edge); border-radius: 100px;
+  padding: 11px 16px; font-family: var(--font-mono); font-size: 13px; outline: none;
+}
+.composer input::placeholder { color: var(--dim); }
+.mic, .send {
+  position: relative;
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 1px solid var(--panel-edge); background: transparent; color: var(--fg);
+  cursor: pointer; font-size: 14px; flex: 0 0 auto;
+}
+/* 睡眠开关：开启态高亮（emoji 颜色改不动，靠背景/边框/发光 + 徽标表达「已开 + 还剩几分钟」） */
+.mic.sleep-on { background: rgba(0, 224, 138, 0.16); border-color: var(--accent); box-shadow: 0 0 14px rgba(0, 224, 138, 0.45); }
+.sleep-badge {
+  position: absolute; top: -4px; right: -4px;
+  min-width: 16px; height: 16px; padding: 0 3px; border-radius: 9px;
+  background: var(--accent); color: var(--bg);
+  font: 600 9px/16px var(--font-mono); text-align: center; pointer-events: none;
+}
+.sleep-badge:empty { display: none; }
+.send { background: var(--fg); color: var(--bg); border: none; }
+#sleepBtn { padding: 0; overflow: visible; }
+.sleep-icon { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.mic:hover, .send:hover { opacity: 0.85; }
+button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── 底栏（已隐藏：去掉「CLAUDIO FM · CONNECTED」那行，腾给聊天框/歌词区；连接状态在直播区头部的 LIVE/OFFLINE 标已可见）── */
+.footbar { display: none; }
+
+/* ── 设置抽屉：保持单屏播放器不滚，设置自身可滚 ── */
+.hidden { display: none !important; }
+.settings-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(12px);
+}
+.settings-panel {
+  width: min(560px, 100%); max-height: min(760px, calc(100vh - 28px)); overflow-y: auto;
+  border: 1px solid var(--panel-edge); border-radius: 18px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  color: var(--fg); padding: 20px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .55), 0 0 32px rgba(0, 224, 138, .09);
+}
+.settings-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+.settings-kicker { font-size: 9px; letter-spacing: 2px; color: var(--accent); }
+.settings-head h2 { margin-top: 3px; font-family: var(--font-cn); font-size: 24px; }
+.settings-close {
+  border: 1px solid var(--panel-edge); border-radius: 50%; width: 34px; height: 34px;
+  background: transparent; color: var(--fg); font-size: 22px; cursor: pointer;
+}
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.settings-group { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
+.settings-group label { font: 600 12px var(--font-cn); color: var(--fg); }
+.settings-group select, .settings-group input {
+  width: 100%; border: 1px solid var(--panel-edge); border-radius: 9px;
+  background: var(--bg); color: var(--fg); padding: 11px 12px;
+  font: 12px var(--font-cn); outline: none;
+}
+.settings-group select:focus, .settings-group input:focus { border-color: var(--accent); }
+.settings-group select:disabled { opacity: .45; }
+.settings-group input::placeholder { color: var(--dim); opacity: .72; }
+.settings-hint, .settings-footnote, .settings-result {
+  font: 11px/1.6 var(--font-cn); color: var(--dim);
+}
+.settings-actions { display: flex; gap: 10px; margin-top: 4px; }
+.settings-actions button {
+  flex: 1; border-radius: 9px; padding: 11px 12px; cursor: pointer;
+  font: 600 12px var(--font-cn);
+}
+.settings-primary { border: 0; background: var(--accent); color: #001b10; }
+.settings-secondary { border: 1px solid var(--panel-edge); background: transparent; color: var(--fg); }
+.settings-result { min-height: 18px; margin: 9px 1px 15px; }
+.settings-result.ok { color: var(--accent); }
+.settings-result.error { color: #ff5d73; }
+.settings-section {
+  border: 1px solid var(--panel-edge); border-radius: 12px; padding: 14px;
+  margin: 5px 0 15px; background: color-mix(in srgb, var(--bg) 45%, transparent);
+}
+.settings-section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 13px; }
+.settings-section-title { font: 700 13px var(--font-cn); }
+.settings-badge {
+  margin-left: 8px; padding: 3px 7px; border: 1px solid rgba(0, 224, 138, .35);
+  border-radius: 999px; color: var(--accent); font: 9px var(--font-cn);
+}
+.compact-actions { margin-top: -2px; }
+.fish-preview { width: 100%; height: 34px; margin: -7px 0 6px; }
+.memory-card { border: 1px solid var(--panel-edge); border-radius: 12px; padding: 13px; margin-bottom: 12px; }
+.memory-card-head { display: flex; justify-content: space-between; align-items: center; font: 600 12px var(--font-cn); }
+.memory-card-head button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font: 11px var(--font-cn); }
+.profile-summary { margin-top: 9px; color: var(--dim); font: 11px/1.7 var(--font-cn); white-space: pre-line; }
+
+/* ── 交互反馈 ── */
+.ctrl, .pill, .seg-btn, .mic, .send { transition: transform .12s ease, background .15s, border-color .15s, color .15s, box-shadow .15s; }
+.ctrl:active, .mic:active, .send:active, .pill:active, .seg-btn:active { transform: scale(0.9); }
+.ctrl:hover { box-shadow: 0 0 14px rgba(0, 224, 138, 0.28); }
+.ctrl-main:active { transform: scale(0.92); }
+.send:hover, .mic:hover { box-shadow: 0 0 14px rgba(0, 224, 138, 0.3); }
+.vol input[type="range"]::-webkit-slider-thumb { transition: transform .12s, box-shadow .15s; }
+.vol input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.4); box-shadow: 0 0 10px var(--accent); }
+.bar { transition: height .12s; }
+.bar:hover { height: 5px; }
+.bar:hover .bar-fill { box-shadow: 0 0 10px var(--accent); }
+.composer input:focus { border-color: var(--accent); box-shadow: 0 0 12px rgba(0, 224, 138, 0.2); }
+
+/* ── 动效 / 全屏鼠标交互（增量增强，守 Nothing 克制美学：单色 accent、低强度、合成层优先）── */
+:root { --mx: 50vw; --my: 50vh; --mxr: 0.5; --myr: 0.5; }
+
+/* 鼠标跟随光晕 / 点阵聚光已移除（用户反馈：太大、很丑、鼠标移出后还滞留在边缘）。
+   背景氛围改由 .bg-glow 环境光晕 + .meteors 流星营造，不依赖鼠标、不会滞留。 */
+.cursor-glow, .spotlight { display: none !important; }
+@media (hover: hover) and (pointer: fine) {
+  /* 卡片随鼠标轻微响应：时钟面板抬升+发光，字幕区发光提示可交互（不做 3D tilt，避免扭曲 LED 时钟坐标映射） */
+  .clock-panel:hover { transform: translateY(-2px); box-shadow: 0 8px 34px rgba(0, 224, 138, 0.12); }
+  .live:hover { box-shadow: 0 8px 30px rgba(0, 224, 138, 0.08); }
+}
+.clock-panel, .live { transition: transform .3s ease, box-shadow .3s ease; }
+
+/* 字幕逐条进场（仅新插入行加 .enter 触发，动画结束 JS 摘除，不与 active 高亮叠加） */
+@keyframes line-in { from { opacity: 0; transform: translateY(8px); filter: blur(2px); } to { opacity: 1; transform: translateY(0); filter: blur(0); } }
+.line.enter { animation: line-in .45s cubic-bezier(.2, .7, .2, 1) both; }
+
+/* 思考态：歌被压成背景、波形静默时，用绿色脉动文字填补等待空窗 */
+body.thinking .now-state { color: var(--accent); animation: think-pulse 1.1s ease-in-out infinite; }
+@keyframes think-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+
+/* 播放态：主按钮柔和呼吸光环 */
+body.playing .ctrl-main { animation: play-breathe 2.6s ease-in-out infinite; }
+@keyframes play-breathe { 0%, 100% { box-shadow: 0 0 8px rgba(0, 224, 138, 0.22); } 50% { box-shadow: 0 0 20px rgba(0, 224, 138, 0.5); } }
+
+/* 收藏心跳 */
+@keyframes fav-heartbeat { 0% { transform: scale(1); } 25% { transform: scale(1.32); } 45% { transform: scale(.92); } 70% { transform: scale(1.12); } 100% { transform: scale(1); } }
+.fav-pulse { animation: fav-heartbeat .5s ease; }
+
+/* 主题切换柔和揭示（支持 View Transitions 的浏览器；不支持则即时切换） */
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: .35s; }
+
+/* 无障碍 / 省电：关掉持续性大动效，保留 hover 等微交互 transition */
+@media (prefers-reduced-motion: reduce) {
+  .bg-glow, .bg-glow::after, .cursor-glow, .spotlight, .dot,
+  .meteors::before, .meteors::after,
+  body.thinking .now-state, body.playing .ctrl-main { animation: none !important; }
+  .cursor-glow, .spotlight, .meteors { display: none !important; }
+  .line.enter { animation: none !important; opacity: 1 !important; }
+}
+
+/* ── 紧凑布局（手机竖屏 + Tauri 桌面小窗共用）──
+   阈值 560：默认 440 窗口、以及小幅加宽（~380–560）统一走这套紧凑版（用户偏好的布局），
+   不再在 430 处从紧凑突变成桌面布局而把顶栏挤溢出。>560 才退回宽屏桌面布局。 */
+@media (max-width: 560px) {
+  .frame { padding: 12px 13px 10px; gap: 10px; }
+  .logo { font-size: 21px; letter-spacing: 3px; }
+  .clock-panel { padding: 12px 14px 10px; }
+  .clock-canvas { height: 66px; }
+  .wave-big { height: 40px; }
+  .player { gap: 10px; }
+  .now-mini { min-width: 100%; order: -1; }
+  .controls { flex-wrap: wrap; }
+  .transport { gap: 7px; flex: 1; justify-content: space-between; }
+  .ctrl { width: 44px; height: 44px; }
+  .ctrl-main { width: 48px; height: 48px; }
+  .vol { width: 100%; justify-content: flex-end; }
+  .vol input[type="range"] { width: 84px; }
+  .bubble { font-size: 16px; }
+  .top-actions { gap: 6px; }
+  .seg-btn, .pill { padding: 7px 11px; font-size: 10px; }
+  .fish-credit { padding: 6px 9px; font-size: 9px; gap: 4px; }
+  .fish-credit .fc-label { display: none; } /* 窄屏只留绿点 + 金额，省空间 */
+  .composer input { padding: 13px 16px; }
+  .settings-panel { padding: 17px; }
+  .settings-grid { grid-template-columns: 1fr; gap: 0; }
+}
