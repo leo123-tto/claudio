@@ -6,6 +6,7 @@ import {
 } from '../claude.js';
 import { getSettings } from '../settings.js';
 import { codexAppServer } from './codex-app-server.js';
+import { callGrokRaw, callGrokStream } from './grok.js';
 import { extractJson, extractSayValue, normalizeResult } from './normalize.js';
 
 function selection() {
@@ -23,6 +24,7 @@ export async function callLlmRaw(prompt, { timeout = 20000 } = {}) {
   if (provider === 'codex') return codexAppServer.generate(prompt, { model, effort, timeout });
   if (provider === 'claude') return callClaudeRaw(prompt, { model, timeout, forceClaude: true });
   if (provider === 'deepseek') return callDeepSeekRaw(prompt, { model, timeout });
+  if (provider === 'grok') return callGrokRaw(prompt, { model, effort, timeout });
   throw new Error(`未知模型供应商：${provider}`);
 }
 
@@ -31,6 +33,7 @@ export async function callLlmStream(prompt, { onText, timeout = 20000 } = {}) {
   if (provider === 'codex') return codexAppServer.generate(prompt, { model, effort, onText, timeout });
   if (provider === 'claude') return callClaudeStream(prompt, { model, onText, timeout, forceClaude: true });
   if (provider === 'deepseek') return callDeepSeekStream(prompt, { model, onText, timeout });
+  if (provider === 'grok') return callGrokStream(prompt, { model, effort, onText, timeout });
   throw new Error(`未知模型供应商：${provider}`);
 }
 

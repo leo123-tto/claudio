@@ -6,11 +6,12 @@ import {
   DEEPSEEK_MODELS,
   DEFAULT_SETTINGS,
   FISH_MODELS,
+  GROK_MODELS,
   mergeSettings,
   toPublicSettings,
 } from '../server/settings.js';
 
-test('默认使用 Luna + low，并保留三个可切换供应商', () => {
+test('默认使用 Luna + low，并保留四个可切换供应商', () => {
   assert.equal(DEFAULT_SETTINGS.llm.provider, 'codex');
   assert.equal(DEFAULT_SETTINGS.llm.models.codex, 'gpt-5.6-luna');
   assert.equal(DEFAULT_SETTINGS.llm.reasoningEffort, 'low');
@@ -21,8 +22,10 @@ test('默认使用 Luna + low，并保留三个可切换供应商', () => {
   });
   assert.deepEqual(CLAUDE_MODELS, ['sonnet', 'opus']);
   assert.deepEqual(DEEPSEEK_MODELS, ['deepseek-v4-flash', 'deepseek-v4-pro']);
+  assert.deepEqual(GROK_MODELS, ['grok-4.6', 'grok-4.5', 'grok-composer-2.5-fast']);
   assert.deepEqual(FISH_MODELS, ['s1', 's2-pro']);
   assert.equal(DEFAULT_SETTINGS.llm.models.deepseek, 'deepseek-v4-flash');
+  assert.equal(DEFAULT_SETTINGS.llm.models.grok, 'grok-4.6');
   assert.equal(DEFAULT_SETTINGS.tts.provider, 'fish');
 });
 
@@ -34,6 +37,7 @@ test('设置补丁只允许已知模型、供应商和推荐模式', () => {
         codex: 'gpt-5.6-terra',
         claude: 'opus',
         deepseek: 'deepseek-v4-pro',
+        grok: 'grok-composer-2.5-fast',
       },
     },
     tts: { fish: { model: 's2-pro', referenceId: 'voice-123' } },
@@ -44,6 +48,7 @@ test('设置补丁只允许已知模型、供应商和推荐模式', () => {
   assert.equal(next.llm.models.codex, 'gpt-5.6-terra');
   assert.equal(next.llm.models.claude, 'opus');
   assert.equal(next.llm.models.deepseek, 'deepseek-v4-pro');
+  assert.equal(next.llm.models.grok, 'grok-composer-2.5-fast');
   assert.equal(next.tts.fish.model, 's2-pro');
   assert.equal(next.tts.fish.referenceId, 'voice-123');
   assert.equal(next.recommendation.mode, 'balanced');
@@ -57,6 +62,8 @@ test('设置补丁只允许已知模型、供应商和推荐模式', () => {
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { llm: { models: { codex: 'gpt-nope' } } }));
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { llm: { models: { claude: 'haiku' } } }));
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { llm: { models: { deepseek: 'deepseek-chat' } } }));
+  assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { llm: { models: { grok: 'grok-nope' } } }));
+  assert.equal(mergeSettings(DEFAULT_SETTINGS, { llm: { provider: 'grok' } }).llm.provider, 'grok');
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { tts: { provider: 'say' } }));
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { tts: { fish: { model: 'speech-1.5' } } }));
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { recommendation: { mode: 'chaos' } }));
@@ -68,7 +75,14 @@ test('公开设置不包含任何密钥或环境变量值', () => {
     codex: true,
     claude: false,
     deepseek: true,
-  }, { deepseek: true, fish: true });
+    grok: true,
+  }, { deepseek: true, fish: true, grok: true }, {
+    grok: {
+      loggedIn: true,
+      email: 'leo@x.ai',
+      pending: { status: 'pending', userCode: 'ABCD-EFGH', verificationUri: 'https://auth.x.ai/activate' },
+    },
+  });
 
   assert.equal(publicValue.llm.provider, 'codex');
   assert.deepEqual(publicValue.tts, DEFAULT_SETTINGS.tts);
@@ -76,12 +90,15 @@ test('公开设置不包含任何密钥或环境变量值', () => {
     codex: true,
     claude: false,
     deepseek: true,
+    grok: true,
   });
   assert.deepEqual(publicValue.credentials, {
     deepseek: true,
     fish: true,
+    grok: true,
   });
-  assert.doesNotMatch(JSON.stringify(publicValue), /api.?key|token|secret/i);
+  assert.equal(publicValue.auth.grok.email, 'leo@x.ai');
+  assert.doesNotMatch(JSON.stringify(publicValue), /api.?key|accessToken|refreshToken|secret/i);
 });
 
 test('已落盘的完整设置能够在重启时重新归一化读取', () => {
@@ -89,4 +106,5 @@ test('已落盘的完整设置能够在重启时重新归一化读取', () => {
   const reloaded = mergeSettings(DEFAULT_SETTINGS, persisted);
   assert.deepEqual(reloaded.recommendation.mix, { familiar: 10, adjacent: 65, explore: 25 });
   assert.equal(reloaded.llm.models.codex, 'gpt-5.6-luna');
+  assert.equal(reloaded.llm.models.grok, 'grok-4.6');
 });

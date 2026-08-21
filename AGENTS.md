@@ -41,7 +41,7 @@ TTS 把稿子合成人声，网页播放器一边放歌一边念词，并能按�
 
 ## 四层架构（忠于原版，详见 docs/architecture.md）
 
-1. **外部上下文** — 用户语料 `user/*.md` · Codex（大脑）· 网易云（音乐）· 声音 I/O（TTS / 天气 / 音响；日历已取消）
+1. **外部上下文** — 用户语料 `user/*.md` · ChatGPT / Grok / Claude / DeepSeek（大脑）· 网易云（音乐）· 声音 I/O（TTS / 天气 / 音响；日历已取消）
 2. **本地大脑** — `router` 意图分流 · `context` 提示词组装 · `Codex` 适配器 · `scheduler` 节律 · `tts` 声音管线 · `state` 记忆
 3. **运行时聚合** — 每次触发把 6 片粘成 prompt → 模型前向 → `{say, play[], reason, memory}` → ncm 解析队列 + tts 合成 + WS 推 now-playing
 4. **交互表层** — PWA 播放器 + HTTP / WS 契约
@@ -52,7 +52,7 @@ TTS 把稿子合成人声，网页播放器一边放歌一边念词，并能按�
 
 | 层 | 选型 | 说明 |
 |---|---|---|
-| 大脑 | Codex app-server（默认 `gpt-5.6-luna`） | ChatGPT 订阅免 API key；常驻连接、low + priority；设置页可切 Terra/Sol、Claude、DeepSeek |
+| 大脑 | Codex app-server（默认 `gpt-5.6-luna`） | ChatGPT 订阅免 API key；常驻连接、low + priority；设置页可切 Terra/Sol、Grok 订阅、Claude、DeepSeek |
 | 音乐 | NeteaseCloudMusicApiEnhanced（本地实例，外部服务） | search / song_url / lyric / recommend |
 | TTS | Fish Audio 流式（默认 fish · s1） | 边生成边播放并缓存；失败明确提示，**不自动回退 macOS `say`**；say 仅保留手工开发选项 |
 | 后端 | Node.js (ESM) + Express + ws | node ≥ 20 |
@@ -79,6 +79,8 @@ claudio/
 │  ├─ router.js              # 输入归一化（空=自动开一期 / 非空=交 Codex 判断）
 │  ├─ context.js             # 多片拼 system prompt（含选歌多样性「起手种子」）
 │  ├─ Codex.js              # spawn Codex -p；normalizeResult 解析 {say,play[],reason,memory}
+│  ├─ grok-auth.js           # Grok 订阅：浏览器设备码登录 / 刷新 / 本机落盘
+│  ├─ open-url.js            # 系统浏览器打开外链（白名单）
 │  ├─ ncm.js                 # 网易云：search → song_url → lyric
 │  ├─ tts/
 │  │  ├─ index.js            # synthesize() 工厂 + 缓存（可插拔）
@@ -142,7 +144,7 @@ claudio/
 - **最小必要改动**，保持现有风格；模块单一职责。
 - 音乐源、TTS 一律做成**可插拔**（面向全功能：以后加 QQ 音乐 / 本地文件 / 其他 TTS）。
 - 不提交 `.env`、`cache/`、`node_modules/`。
-- 敏感信息（Fish key、网易云 cookie）**只放 `.env`**，绝不写进代码 / 日志 / 提交记录。
+- 敏感信息（Fish key、网易云 cookie、Grok 订阅 token）**只放 `.env` / `cache/`**，绝不写进代码 / 日志 / 提交记录。
 - 进度写 `docs/progress.md`；本文件只放稳定总览。
 - 新增第三方依赖要说明理由、作用、影响。
 - 未经用户明确确认，不执行 `git commit` / `git push` / 部署。
@@ -190,7 +192,10 @@ MVP 4 条 → 全功能 6 条：
 | GET | `/api/memory` | 读长期记忆 | ✅ |
 | GET | `/api/weather` | 当前天气 | ✅ |
 | GET | `/api/fish-credit` | Fish 余额（key 只在后端） | ✅ |
-| GET | `/api/open` | 系统浏览器打开外链（Tauri 里 `window.open` 失效；白名单 `https://fish.audio/`） | ✅ |
+| GET | `/api/open` | 系统浏览器打开外链（Tauri 里 `window.open` 失效；白名单 `fish.audio` / `auth.x.ai` / `accounts.x.ai`） | ✅ |
+| GET | `/api/settings/grok` | Grok 订阅登录状态（不含 token） | ✅ |
+| POST | `/api/settings/grok/login` | 弹出浏览器做设备码验证并保存登录态 | ✅ |
+| POST | `/api/settings/grok/logout` | 清除本机 Grok 登录态 | ✅ |
 | GET | `/api/status` | 健康检查 + 首期预热状态 | ✅ |
 | GET | `/api/taste` | 读用户口味档案 | 未实现 |
 | GET | `/api/plan/today` | 今日节目编排 | 未实现 |

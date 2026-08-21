@@ -5,6 +5,7 @@ import { config } from './config.js';
 export const CODEX_MODELS = ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'];
 export const CLAUDE_MODELS = ['sonnet', 'opus'];
 export const DEEPSEEK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+export const GROK_MODELS = ['grok-4.6', 'grok-4.5', 'grok-composer-2.5-fast'];
 export const FISH_MODELS = ['s1', 's2-pro'];
 export const REASONING_EFFORTS = ['low', 'medium'];
 export const RECOMMENDATION_MIXES = Object.freeze({
@@ -23,6 +24,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
       deepseek: DEEPSEEK_MODELS.includes(config.llm.deepseek.model)
         ? config.llm.deepseek.model
         : 'deepseek-v4-flash',
+      grok: GROK_MODELS[0],
     }),
     reasoningEffort: 'low',
   }),
@@ -40,7 +42,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
 });
 
 const SETTINGS_FILE = path.join(config.paths.cache, 'settings.json');
-const PROVIDERS = ['codex', 'claude', 'deepseek'];
+const PROVIDERS = ['codex', 'claude', 'deepseek', 'grok'];
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -83,6 +85,9 @@ export function mergeSettings(current = DEFAULT_SETTINGS, patch = {}) {
       }
       if (patch.llm.models.deepseek !== undefined && !DEEPSEEK_MODELS.includes(patch.llm.models.deepseek)) {
         throw new TypeError('不支持的 DeepSeek 模型');
+      }
+      if (patch.llm.models.grok !== undefined && !GROK_MODELS.includes(patch.llm.models.grok)) {
+        throw new TypeError('不支持的 Grok 模型');
       }
       for (const provider of PROVIDERS) {
         if (patch.llm.models[provider] !== undefined) next.llm.models[provider] = patch.llm.models[provider];
@@ -128,7 +133,7 @@ export function mergeSettings(current = DEFAULT_SETTINGS, patch = {}) {
   return next;
 }
 
-export function toPublicSettings(settings, availability = {}, credentials = {}) {
+export function toPublicSettings(settings, availability = {}, credentials = {}, auth = {}) {
   return {
     version: settings.version,
     llm: clone(settings.llm),
@@ -139,6 +144,7 @@ export function toPublicSettings(settings, availability = {}, credentials = {}) 
       codexModels: CODEX_MODELS,
       claudeModels: CLAUDE_MODELS,
       deepseekModels: DEEPSEEK_MODELS,
+      grokModels: GROK_MODELS,
       fishModels: FISH_MODELS,
       reasoningEfforts: REASONING_EFFORTS,
       recommendationModes: Object.keys(RECOMMENDATION_MIXES),
@@ -147,10 +153,21 @@ export function toPublicSettings(settings, availability = {}, credentials = {}) 
       codex: Boolean(availability.codex),
       claude: Boolean(availability.claude),
       deepseek: Boolean(availability.deepseek),
+      grok: Boolean(availability.grok),
     },
     credentials: {
       deepseek: Boolean(credentials.deepseek),
       fish: Boolean(credentials.fish),
+      grok: Boolean(credentials.grok),
+    },
+    auth: {
+      grok: auth.grok && typeof auth.grok === 'object'
+        ? {
+          loggedIn: Boolean(auth.grok.loggedIn),
+          email: typeof auth.grok.email === 'string' ? auth.grok.email : '',
+          pending: auth.grok.pending || null,
+        }
+        : { loggedIn: Boolean(credentials.grok), email: '', pending: null },
     },
   };
 }
