@@ -12,8 +12,9 @@ const el = {};
   'liveTag', 'connMsg', 'stream', 'nowPlaying', 'moodInput', 'sleepBtn', 'sleepBadge', 'sendBtn', 'connState',
   'fishCredit', 'fishCreditVal', 'miniLyric', 'airplayBtn',
   'settingsBtn', 'settingsBackdrop', 'settingsClose', 'providerSelect', 'modelSelect', 'effortSelect',
-  'codexSettings', 'claudeSettings', 'deepseekSettings', 'claudeAccessSelect', 'claudeModelSelect',
+  'codexSettings', 'claudeSettings', 'deepseekSettings', 'grokSettings', 'claudeAccessSelect', 'claudeModelSelect',
   'deepseekModelSelect', 'deepseekApiKey', 'deepseekKeyHint',
+  'grokModelSelect', 'grokEffortSelect', 'grokLoginHint', 'grokLoginBtn', 'grokLogoutBtn', 'grokOpenVerifyBtn', 'grokLoginResult',
   'fishApiKey', 'fishModelSelect', 'fishVoiceId', 'fishKeyStatus', 'testFishBtn', 'fishTestResult', 'fishPreview',
   'recommendationSelect', 'providerHint', 'testModelBtn', 'saveSettingsBtn', 'settingsResult',
   'favoritesCount', 'favoritePlaylistInput', 'importFavoritesBtn', 'favoritesImportResult',
@@ -47,7 +48,8 @@ setInterval(loadFishCredit, 5 * 60 * 1000); // 每 5 分钟刷新
 
 // ── 设置：模型供应商 / ChatGPT 模型 / 推荐探索度，均为运行时切换 ──
 let settingsPayload = null;
-const PROVIDER_NAMES = { codex: 'ChatGPT', claude: 'Claude', deepseek: 'DeepSeek' };
+let grokPollTimer = null;
+const PROVIDER_NAMES = { codex: 'ChatGPT', claude: 'Claude', deepseek: 'DeepSeek', grok: 'Grok' };
 function showSettingsResult(text, kind = '') {
   el.settingsResult.textContent = text;
   el.settingsResult.className = `settings-result ${kind}`.trim();
@@ -55,6 +57,62 @@ function showSettingsResult(text, kind = '') {
 function showFishResult(text, kind = '') {
   el.fishTestResult.textContent = text;
   el.fishTestResult.className = `settings-result ${kind}`.trim();
+}
+function showGrokResult(text, kind = '') {
+  el.grokLoginResult.textContent = text;
+  el.grokLoginResult.className = `settings-result ${kind}`.trim();
+}
+function grokAuthState() {
+  return settingsPayload?.auth?.grok || { loggedIn: false, email: '', pending: null };
+}
+function syncGrokLoginUi() {
+  const grok = grokAuthState();
+  const pending = grok.pending?.status === 'pending' ? grok.pending : null;
+  el.grokLoginBtn.classList.toggle('hidden', Boolean(grok.loggedIn));
+  el.grokLogoutBtn.classList.toggle('hidden', !grok.loggedIn);
+  el.grokOpenVerifyBtn.classList.toggle('hidden', !pending?.verificationUriComplete && !pending?.verificationUri);
+  el.grokLoginBtn.disabled = Boolean(pending);
+  if (pending) {
+    el.grokLoginHint.textContent = `请在打开的浏览器里完成验证${pending.userCode ? `，验证码 ${pending.userCode}` : ''}。`;
+    showGrokResult(pending.browserOpened === false
+      ? '未能自动打开浏览器，请点「打开验证页」。'
+      : '已弹出系统浏览器，正在等待验证…');
+  } else if (grok.loggedIn) {
+    el.grokLoginHint.textContent = grok.email
+      ? `已登录 Grok 订阅（${grok.email}）。登录态保存在本机，下次打开 App 无需再验证。`
+      : '已登录 Grok 订阅。登录态保存在本机，下次打开 App 无需再验证。';
+    showGrokResult('Grok 订阅可用。切换后从下一次推荐开始生效。', 'ok');
+  } else if (grok.pending?.status === 'error') {
+    el.grokLoginHint.textContent = '登录未完成，可以重新弹出浏览器验证。';
+    showGrokResult(grok.pending.error || '登录失败', 'error');
+  } else {
+    el.grokLoginHint.textContent = '尚未登录 Grok 订阅。点登录后会弹出系统浏览器，用 SuperGrok / X Premium+ 账号验证。';
+    showGrokResult('登录态只保存在这台电脑，界面不会回显 token。');
+  }
+}
+function stopGrokPoll() {
+  if (grokPollTimer) {
+    clearInterval(grokPollTimer);
+    grokPollTimer = null;
+  }
+}
+async function refreshGrokStatus() {
+  try {
+    const data = await (await fetch('/api/settings/grok')).json();
+    if (!data.ok) throw new Error(data.error || '读取失败');
+    if (data.settings) settingsPayload = data.settings;
+    else if (settingsPayload) settingsPayload.auth = { ...(settingsPayload.auth || {}), grok: data.grok };
+    syncGrokLoginUi();
+    syncProviderControls();
+    const pending = grokAuthState().pending?.status === 'pending';
+    if (!pending) stopGrokPoll();
+  } catch (error) {
+    showGrokResult(`登录状态读取失败：${error.message}`, 'error');
+  }
+}
+function startGrokPoll() {
+  stopGrokPoll();
+  grokPollTimer = setInterval(refreshGrokStatus, 1500);
 }
 function showFavoritesResult(text, kind = '') {
   el.favoritesImportResult.textContent = text;
@@ -66,8 +124,10 @@ function syncProviderControls() {
   el.codexSettings.classList.toggle('hidden', provider !== 'codex');
   el.claudeSettings.classList.toggle('hidden', provider !== 'claude');
   el.deepseekSettings.classList.toggle('hidden', provider !== 'deepseek');
+  el.grokSettings.classList.toggle('hidden', provider !== 'grok');
   const descriptions = {
     codex: '使用 ChatGPT 订阅；Luna 默认最快且质量平衡。',
+    grok: '使用 Grok 订阅；在浏览器验证一次后，登录态保存在本机。',
     claude: '使用 Claude 订阅，可联动选择 Sonnet 或 Opus。',
     deepseek: '使用 DeepSeek API，可联动选择 V4 Flash 或 V4 Pro。',
   };
@@ -82,7 +142,9 @@ async function loadSettings() {
     el.modelSelect.value = settingsPayload.llm.models.codex;
     el.claudeModelSelect.value = settingsPayload.llm.models.claude;
     el.deepseekModelSelect.value = settingsPayload.llm.models.deepseek;
+    el.grokModelSelect.value = settingsPayload.llm.models.grok || 'grok-4.6';
     el.effortSelect.value = settingsPayload.llm.reasoningEffort;
+    el.grokEffortSelect.value = settingsPayload.llm.reasoningEffort;
     el.fishModelSelect.value = settingsPayload.tts.fish.model;
     el.fishVoiceId.value = settingsPayload.tts.fish.referenceId || '';
     el.recommendationSelect.value = settingsPayload.recommendation.mode;
@@ -94,6 +156,9 @@ async function loadSettings() {
     el.fishApiKey.placeholder = fishReady ? '已配置 · 留空不修改' : '填写后保存在本机';
     el.deepseekKeyHint.textContent = deepseekReady ? 'API Key 已配置，界面不会回显原值。' : '尚未配置 API Key。';
     el.fishKeyStatus.textContent = fishReady ? 'API 已配置' : '未配置 API';
+    syncGrokLoginUi();
+    if (grokAuthState().pending?.status === 'pending') startGrokPoll();
+    else stopGrokPoll();
     syncProviderControls();
   } catch (error) {
     showSettingsResult(`设置读取失败：${error.message}`, 'error');
@@ -121,8 +186,9 @@ async function saveSettings({ quiet = false } = {}) {
             codex: el.modelSelect.value,
             claude: el.claudeModelSelect.value,
             deepseek: el.deepseekModelSelect.value,
+            grok: el.grokModelSelect.value,
           },
-          reasoningEffort: el.effortSelect.value,
+          reasoningEffort: el.providerSelect.value === 'grok' ? el.grokEffortSelect.value : el.effortSelect.value,
         },
         tts: {
           provider: 'fish',
@@ -140,6 +206,7 @@ async function saveSettings({ quiet = false } = {}) {
     el.fishApiKey.placeholder = settingsPayload.credentials.fish ? '已配置 · 留空不修改' : '填写后保存在本机';
     el.deepseekKeyHint.textContent = settingsPayload.credentials.deepseek ? 'API Key 已配置，界面不会回显原值。' : '尚未配置 API Key。';
     el.fishKeyStatus.textContent = settingsPayload.credentials.fish ? 'API 已配置' : '未配置 API';
+    syncGrokLoginUi();
     syncProviderControls();
     if (!quiet) showSettingsResult('已保存，从下一次推荐开始生效。', 'ok');
     return true;
@@ -185,6 +252,7 @@ function openSettings() {
 function closeSettings() {
   el.settingsBackdrop.classList.add('hidden');
   el.settingsBackdrop.setAttribute('aria-hidden', 'true');
+  stopGrokPoll();
 }
 el.settingsBtn.addEventListener('click', openSettings);
 el.settingsClose.addEventListener('click', closeSettings);
@@ -193,6 +261,42 @@ document.addEventListener('keydown', (event) => { if (event.key === 'Escape') cl
 el.providerSelect.addEventListener('change', syncProviderControls);
 el.saveSettingsBtn.addEventListener('click', () => saveSettings());
 el.refreshProfileBtn.addEventListener('click', loadProfileSummary);
+el.grokLoginBtn.addEventListener('click', async () => {
+  el.grokLoginBtn.disabled = true;
+  showGrokResult('正在打开系统浏览器…');
+  try {
+    const data = await (await fetch('/api/settings/grok/login', { method: 'POST' })).json();
+    if (!data.ok) throw new Error(data.error || '无法开始登录');
+    if (data.settings) settingsPayload = data.settings;
+    else if (settingsPayload) settingsPayload.auth = { ...(settingsPayload.auth || {}), grok: data.grok };
+    syncGrokLoginUi();
+    const pending = grokAuthState().pending;
+    const verifyUrl = pending?.verificationUriComplete || pending?.verificationUri;
+    if (verifyUrl && pending?.browserOpened === false) openExternal(verifyUrl);
+    startGrokPoll();
+  } catch (error) {
+    el.grokLoginBtn.disabled = false;
+    showGrokResult(`无法开始登录：${error.message}`, 'error');
+  }
+});
+el.grokLogoutBtn.addEventListener('click', async () => {
+  stopGrokPoll();
+  try {
+    const data = await (await fetch('/api/settings/grok/logout', { method: 'POST' })).json();
+    if (!data.ok) throw new Error(data.error || '退出失败');
+    if (data.settings) settingsPayload = data.settings;
+    else if (settingsPayload) settingsPayload.auth = { ...(settingsPayload.auth || {}), grok: data.grok };
+    syncGrokLoginUi();
+    syncProviderControls();
+  } catch (error) {
+    showGrokResult(`退出失败：${error.message}`, 'error');
+  }
+});
+el.grokOpenVerifyBtn.addEventListener('click', () => {
+  const pending = grokAuthState().pending;
+  const verifyUrl = pending?.verificationUriComplete || pending?.verificationUri;
+  if (verifyUrl) openExternal(verifyUrl);
+});
 el.importFavoritesBtn.addEventListener('click', async () => {
   const playlist = el.favoritePlaylistInput.value.trim();
   if (!playlist) return showFavoritesResult('请先粘贴网易云歌单链接或歌单 ID。', 'error');

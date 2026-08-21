@@ -22,7 +22,7 @@ npm run app:install
 open /Applications/Claudio.app
 ```
 
-> 右上角 ⚙ 可切 ChatGPT / Claude / DeepSeek、Luna / Terra / Sol 和推荐探索度，也可粘贴网易云歌单链接建立自己的口味曲库。模型和 Fish 密钥只保存在当前电脑。
+> 右上角 ⚙ 可切 ChatGPT / Grok / Claude / DeepSeek、Luna / Terra / Sol 和推荐探索度，也可粘贴网易云歌单链接建立自己的口味曲库。Grok 订阅可在设置里弹出浏览器验证；模型和 Fish 密钥只保存在当前电脑。
 
 ## 隐私
 
@@ -33,7 +33,7 @@ open /Applications/Claudio.app
 ## 使用提醒
 
 - 音乐直链来自第三方网易云 API，仅建议个人学习和自用；请自行遵守所在地法律、平台条款和音乐版权规则。
-- 首次构建需要 macOS、Node.js 20+、Rust 与 Tauri CLI。ChatGPT/Claude 订阅通道还需要本机已有对应客户端或 CLI 登录。
+- 首次构建需要 macOS、Node.js 20+、Rust 与 Tauri CLI。ChatGPT/Claude 订阅通道还需要本机已有对应客户端或 CLI 登录；Grok 订阅可在设置里直接弹出浏览器验证。
 
 ## 文档
 

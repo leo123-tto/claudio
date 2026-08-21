@@ -9,6 +9,7 @@ cache/
 .playwright-cli/
 runtime/
 secrets.json
+grok-auth.json
 *.pem
 *.key
 

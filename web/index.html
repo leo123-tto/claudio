@@ -11,7 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=Doto:wght@400;600;800&family=Space+Mono:wght@400;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=6" />
+    <link rel="stylesheet" href="/styles.css?v=7" />
   </head>
   <body>
     <div class="bg-glow" id="bgGlow"></div>
@@ -130,6 +130,7 @@
           <label for="providerSelect">大模型</label>
           <select id="providerSelect">
             <option value="codex">ChatGPT（订阅）</option>
+            <option value="grok">Grok（订阅）</option>
             <option value="claude">Claude（订阅）</option>
             <option value="deepseek">DeepSeek（API）</option>
           </select>
@@ -154,6 +155,35 @@
               </select>
             </div>
           </div>
+        </div>
+
+        <div class="provider-settings hidden" id="grokSettings">
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label for="grokModelSelect">Grok 模型</label>
+              <select id="grokModelSelect">
+                <option value="grok-4.6">Grok 4.6 · 质量优先</option>
+                <option value="grok-4.5">Grok 4.5</option>
+                <option value="grok-composer-2.5-fast">Composer 2.5 Fast · 速度优先</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="grokEffortSelect">思考强度</label>
+              <select id="grokEffortSelect">
+                <option value="low">低 · 速度优先</option>
+                <option value="medium">中 · 更细致</option>
+              </select>
+            </div>
+          </div>
+          <div class="settings-group">
+            <div class="settings-hint" id="grokLoginHint">尚未登录 Grok 订阅。点登录后会弹出系统浏览器，用 SuperGrok / X Premium+ 账号验证。</div>
+          </div>
+          <div class="settings-actions compact-actions">
+            <button class="settings-secondary" id="grokLoginBtn">在浏览器中登录</button>
+            <button class="settings-secondary hidden" id="grokLogoutBtn">退出登录</button>
+            <button class="settings-secondary hidden" id="grokOpenVerifyBtn">打开验证页</button>
+          </div>
+          <div class="settings-result" id="grokLoginResult">登录态只保存在这台电脑，界面不会回显 token。</div>
         </div>
 
         <div class="provider-settings hidden" id="claudeSettings">
@@ -254,10 +284,10 @@
           <div class="memory-card-head"><span>Claudio 正在学到什么</span><button id="refreshProfileBtn">刷新</button></div>
           <div id="profileSummary" class="profile-summary">正在读取…</div>
         </div>
-        <div class="settings-footnote">API Key 只保存在当前电脑的本地忽略目录，界面和接口均不回显。语音固定使用 Fish Audio；失败会明确提示，不会自动切换到 macOS 本地语音。</div>
+        <div class="settings-footnote">API Key 和 Grok 登录态只保存在当前电脑的本地忽略目录，界面和接口均不回显。语音固定使用 Fish Audio；失败会明确提示，不会自动切换到 macOS 本地语音。</div>
       </section>
     </div>
 
-    <script src="/app.js?v=9" type="module"></script>
+    <script src="/app.js?v=10" type="module"></script>
   </body>
 </html>

@@ -6,7 +6,7 @@
   "bin": {
     "claudio": "bin/claudio.mjs"
   },
-  "description": "个人 AI 电台 — ChatGPT / Claude / DeepSeek 当 DJ 大脑，理解口味并挖掘小众音乐",
+  "description": "个人 AI 电台 — ChatGPT / Grok / Claude / DeepSeek 当 DJ 大脑，理解口味并挖掘小众音乐",
   "engines": {
     "node": ">=20"
   },

@@ -3,7 +3,6 @@
 // 架构：前端（浏览器 / Tauri 窗）用 <audio> 播放，后端只当大脑 + API（不在后台出声）。
 import http from 'node:http';
 import { Readable } from 'node:stream';
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
@@ -22,6 +21,8 @@ import {
 } from './llm/index.js';
 import { getSettings, updateSettings, toPublicSettings } from './settings.js';
 import { credentialStatus, getSecret, updateSecrets } from './secrets.js';
+import { grokAuth } from './grok-auth.js';
+import { assertAllowedOpenUrl, openSystemBrowser } from './open-url.js';
 import * as ncm from './ncm.js';
 import { synthesize } from './tts/index.js';
 import { liveTtsManager, prepareLiveTts } from './tts/live.js';
@@ -76,11 +77,17 @@ function providerAvailability() {
     codex: commandAvailable('codex'),
     claude: commandAvailable(config.claude.bin),
     deepseek: Boolean(getSecret('deepseekApiKey')),
+    grok: grokAuth.isLoggedIn(),
   };
 }
 
 function publicSettings(settings = getSettings()) {
-  return toPublicSettings(settings, providerAvailability(), credentialStatus());
+  return toPublicSettings(settings, providerAvailability(), {
+    ...credentialStatus(),
+    grok: grokAuth.isLoggedIn(),
+  }, {
+    grok: grokAuth.publicStatus(),
+  });
 }
 
 // 把规整后的 result {say, play[], reason, memory} 变成可播节目：合成口播 + 解析直链 + 取词 + 组队列 + 落库。
@@ -399,6 +406,30 @@ app.patch('/api/settings/credentials', (req, res) => {
   }
 });
 
+app.get('/api/settings/grok', (_req, res) => {
+  res.json({ ok: true, grok: grokAuth.publicStatus(), settings: publicSettings() });
+});
+
+app.post('/api/settings/grok/login', async (_req, res) => {
+  try {
+    const grok = await grokAuth.startLogin();
+    res.json({ ok: true, grok, settings: publicSettings() });
+  } catch (error) {
+    res.status(503).json({ ok: false, error: String(error?.message ?? error) });
+  }
+});
+
+app.post('/api/settings/grok/logout', (_req, res) => {
+  try {
+    const grok = grokAuth.logout();
+    const settings = getSettings();
+    if (settings.llm.provider === 'grok') nextEpisode = null;
+    res.json({ ok: true, grok, settings: publicSettings() });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: String(error?.message ?? error) });
+  }
+});
+
 app.post('/api/settings/test', async (_req, res) => {
   try {
     const timing = await testCurrentModel({ timeout: 15000 });
@@ -441,12 +472,16 @@ app.get('/api/fish-credit', async (_req, res) => {
 });
 
 // 用系统默认浏览器打开外部链接（Tauri 窗里前端 window.open 打不开 → 走这里）。
-// 严格白名单 fish.audio 的 https 链接，避免 `open` 被当成任意命令 / 打开本地文件或 app。
+// 严格白名单 https 站点，避免 `open` 被当成任意命令 / 打开本地文件或 app。
 app.get('/api/open', (req, res) => {
-  const url = String(req.query.url || '');
-  if (!/^https:\/\/fish\.audio\//.test(url)) return res.status(400).json({ ok: false, error: 'url not allowed' });
-  try { spawn('open', [url], { detached: true, stdio: 'ignore' }).unref(); res.json({ ok: true }); }
-  catch (e) { res.json({ ok: false, error: String(e?.message ?? e) }); }
+  try {
+    const url = assertAllowedOpenUrl(req.query.url);
+    openSystemBrowser(url);
+    res.json({ ok: true });
+  } catch (e) {
+    const message = String(e?.message ?? e);
+    res.status(message === 'url not allowed' ? 400 : 500).json({ ok: false, error: message });
+  }
 });
 
 app.get('/api/weather', (_req, res) => res.json({ ok: true, weather: getWeather() }));

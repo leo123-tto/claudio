@@ -20,7 +20,7 @@
 └───────────────────────────────▲───────────────────────────┘
                                  │
 ┌─ 第一层 · 外部上下文 ───────────┴───────────────────────────┐
-│  user/*.md · ChatGPT/Claude/DeepSeek · 网易云 · Fish TTS      │
+│  user/*.md · ChatGPT/Grok/Claude/DeepSeek · 网易云 · Fish TTS      │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -31,13 +31,14 @@
 | 块 | MVP | 全功能 |
 |---|---|---|
 | 用户语料 `user/*.md` | taste.md（核心） | + routines / mood-rules / playlists |
-| 大脑 | ✅ Codex app-server（默认 GPT-5.6 Luna） | 可切 Claude / DeepSeek |
+| 大脑 | ✅ Codex app-server（默认 GPT-5.6 Luna） | 可切 Grok 订阅 / Claude / DeepSeek |
 | 音乐 网易云 | ✅ search/song_url | + lyric/recommend/登录态 |
 | 声音 I/O | ✅ TTS | + 天气 ✅ / ~~日历(Lark)~~（已取消） / UPnP(Naim) |
 
 ## 第二层 · 本地大脑（server/）
 
-- **llm/** — 常驻 Codex app-server（默认 GPT-5.6 Luna + low + priority）与统一输出规整；`claude.js` 保留 Claude CLI / DeepSeek provider。
+- **llm/** — 常驻 Codex app-server（默认 GPT-5.6 Luna + low + priority）与统一输出规整；`grok.js` 走 SuperGrok 订阅 OAuth；`claude.js` 保留 Claude CLI / DeepSeek provider。
+- **grok-auth.js** — RFC 8628 设备码登录 `auth.x.ai`，token 以 0600 落在 `cache/grok-auth.json`，过期自动刷新。
 - **settings.js** — `cache/settings.json` 运行时设置；下一次请求即生效，密钥不返回前端。
 - **context.js / recommendation.js / discovery.js** — 场景提示、10/65/25 探索编排、收藏/近期/反感过滤、网易云相似歌曲候选池。
 - **events.js / profile.js** — 只追加真实听歌事件，按显式反馈、收藏、完整听完、秒切等权重生成画像。
