@@ -13,6 +13,13 @@ let current = null;
 let fetching = false;
 let heartbeatTimer = null;
 let qrTimer = null;
+// 这次打开网页卡顿过、降到 320k 了（见「卡顿自动降档」）；同一个标签页刷新还算
+let smooth = (() => { try { return sessionStorage.getItem('dj_smooth') === '1'; } catch { return false; } })();
+let srcChangedAt = 0;
+let seekedAt = 0;
+let stalls = 0;
+let inStall = false;
+let stallTimer = null;
 
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {
@@ -53,6 +60,9 @@ function renderMe() {
   $('moodInput').placeholder = canAsk ? '想听点什么' : '绑定网易云后可以点歌';
   $('bindTip').classList.toggle('hidden', Boolean(canAsk));
   $('memState').textContent = me.prefs?.length ? me.prefs.join('、') : '还没记什么';
+  // 音质只有绑定的会员能选（别的一直是 320k）
+  $('qualityGroup').classList.toggle('hidden', !(me.bound && me.vip));
+  for (const b of $('qualitySeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (me.quality || 'lossless')));
 }
 
 async function load() {
@@ -237,7 +247,7 @@ async function ask(text = '') {
   $('moodInput').disabled = true;
   if (text) { chatStrip.add('user', text); showDj('…'); $('djSay').classList.add('typing'); }
   try {
-    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on') } });
+    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on'), smooth } });
     if (typeof out.remaining === 'number') me.remaining = out.remaining;
     renderMe();
     if (out.needBind) { if (text) showStage(current ? 'lyric' : 'none'); return startQr(); }
@@ -277,47 +287,22 @@ async function ask(text = '') {
 }
 
 // 响度统一：网易云的 gain 是把这首拉到 -18 LUFS 要加的分贝。目标按 -14 LUFS 放，只往下压（最大就是 1），
-// 太吵的母带压下来，偏轻的歌原样放。音量走 Web Audio 的 GainNode；音频都是同源 /media，接进 Web Audio 不会变哑。
-// AudioContext 要在点击里建。音量滑块乘在上面。
+// 太吵的母带压下来，偏轻的歌原样放。只往下压，所以直接用 audio.volume（音量滑块乘在上面），不接 Web Audio：
+// 歌直接从音乐 CDN 取，有的 CDN 不给跨域头，接进 Web Audio 会变哑。iOS 不给改音量（响度不统一，音量用实体键）。
 function loudnessVolume(gain) {
   if (typeof gain !== 'number') return 1;
   return Math.max(0.2, Math.min(1, 10 ** ((gain + 4) / 20)));
 }
 
-let audioCtx = null;
-let gainNode = null;
 let loudness = 1;
-// iOS / iPadOS 锁屏或切后台会挂起 AudioContext，接进去的歌会断声：那里先不接，原生播放（响度不统一，音量用实体键）。
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 document.body.classList.toggle('ios', IOS);
-function ensureAudioGraph() {
-  if (IOS) return;
-  if (audioCtx) {
-    if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
-    return;
-  }
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  if (!Ctx) return;
-  try {
-    audioCtx = new Ctx();
-    gainNode = audioCtx.createGain();
-    audioCtx.createMediaElementSource(audio).connect(gainNode).connect(audioCtx.destination);
-    applyVolume();
-  } catch {
-    audioCtx = null;
-    gainNode = null;
-  }
-}
 function applyVolume() {
-  const v = loudness * (IOS ? 1 : Number($('vol').value) / 100);
-  if (gainNode) { gainNode.gain.value = v; audio.volume = 1; } else audio.volume = v;
+  audio.volume = loudness * (IOS ? 1 : Number($('vol').value) / 100);
 }
 function applyLoudness(gain) { loudness = loudnessVolume(gain); applyVolume(); }
 $('vol').value = Number(store.get('dj_vol') ?? 100);
 $('vol').addEventListener('input', () => { store.set('dj_vol', $('vol').value); applyVolume(); });
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && audioCtx && audioCtx.state !== 'running' && !audio.paused) audioCtx.resume().catch(() => {});
-});
 
 // 口播：服务端给了 voice 就先在后台取成 blob（老板那边不闲会回 204，就没有）；轮到这首时取好了就先念、念完放歌，
 // 没取好就直接放歌，不等。口播和歌用同一个 <audio>（iOS 上第二个音频元素不一定让自动出声）。
@@ -369,9 +354,13 @@ async function startSong(blocked) {
   if (!current) return;
   if (mode === 'voice') showStage('lyric');
   mode = 'song';
-  audio.src = current.url;
-  applyLoudness(current.gain);
-  current.retried = false;
+  const song = current;
+  // 这次卡过、降到 320k 了：队列里早先取的无损歌换成 320k 的再放
+  if ((smooth || me?.quality === 'smooth') && song.level === 'lossless') await refetch(song, { q: 'exhigh' }).catch(() => {});
+  if (current !== song) return;
+  setSrc(song.direct || song.url);
+  applyLoudness(song.gain);
+  song.ladder = null;
   try {
     if (blocked?.name === 'NotAllowedError') throw blocked;
     await audio.play();
@@ -410,23 +399,90 @@ $('bar').addEventListener('click', (event) => {
   audio.currentTime = seekFraction($('bar'), event) * audio.duration;
 });
 
+// 放不了时按顺序退：① 重取直链再放（多半是过期了）② 走家里的同源代理，同一档 ③ 代理要 320k（这台浏览器多半放不了 FLAC）
+// 没有直链的歌只有 ②（无损的直接 ③）。都不行换下一首
+function fallbacks(song) {
+  const ladder = song.direct ? ['direct', 'proxy'] : [];
+  if (song.level === 'lossless') ladder.push('low');
+  else if (!song.direct) ladder.push('proxy');
+  return ladder;
+}
 audio.addEventListener('error', async () => {
   if (!current) return;
   if (mode === 'voice') return startSong();
-  if (!current.retried) {
-    current.retried = true;
-    // 直链过期就让后台重取；这台浏览器放不了无损（FLAC）就要普通档。再出错由这里的下一次 error 换下一首。
-    audio.src = `/media/${current.id}?fresh=1${current.level === 'lossless' ? '&q=exhigh' : ''}`;
+  const song = current;
+  const at = audio.currentTime || 0;
+  song.ladder ??= fallbacks(song);
+  const step = song.ladder.shift();
+  if (step === 'direct') {
+    try { await refetch(song, { fresh: true, ...(smooth ? { q: 'exhigh' } : {}) }); } catch { /* 下一次 error 走代理 */ }
+    if (current !== song) return;
+    setSrc(song.direct || `/media/${song.id}?fresh=1`, at);
+    return audio.play().catch(() => {});
+  }
+  if (step === 'proxy' || step === 'low') {
+    const low = step === 'low' || smooth;
+    setSrc(`/media/${song.id}?fresh=1${low ? '&q=exhigh' : ''}`, at);
     // 退到普通档后实际音质不知道了，不标（不猜）
-    if (current.level === 'lossless') paintQuality($('nowQuality'), null);
-    audio.play().catch(() => {});
-    return;
+    if (step === 'low') paintQuality($('nowQuality'), null);
+    return audio.play().catch(() => {});
   }
   playNext();
 });
 
+function setSrc(url, at = 0) {
+  srcChangedAt = Date.now();
+  audio.src = url;
+  if (at > 1) audio.addEventListener('loadedmetadata', () => { audio.currentTime = at; }, { once: true });
+}
+
+// 重取这首的直链（fresh：直链过期；q=exhigh：要 320k），音质标签按实际拿到的改
+async function refetch(song, { fresh = false, q = '' } = {}) {
+  const params = new URLSearchParams({ ...(fresh ? { fresh: '1' } : {}), ...(q ? { q } : {}) });
+  const info = await api(`/api/song/${encodeURIComponent(song.id)}?${params}`);
+  Object.assign(song, { direct: info.direct || '', url: info.url || song.url, level: info.level || '', bitrate: info.bitrate || 0, gain: info.gain ?? null, quality: info.quality || null });
+  if (current === song) paintQuality($('nowQuality'), song.quality);
+}
+
+// ---- 卡顿自动降档 ----
+// 放歌时缓冲（waiting，或 stalled 时手上已经没数据）超过 2 次，或者一次缓冲超过 5 秒：这次打开网页后面都要 320k。
+// 刚换歌 / 拖进度的那一下不算；按了暂停不算。
+function onStall() {
+  if (mode !== 'song' || !current?.reported || audio.paused || inStall) return;
+  if (Date.now() - Math.max(srcChangedAt, seekedAt) < 1500) return;
+  inStall = true;
+  stalls += 1;
+  if (stalls > 2) return downgrade();
+  clearTimeout(stallTimer);
+  stallTimer = setTimeout(() => { if (inStall) downgrade(); }, 5000);
+}
+audio.addEventListener('waiting', onStall);
+audio.addEventListener('stalled', () => { if (audio.readyState < 3) onStall(); });
+audio.addEventListener('playing', () => { inStall = false; clearTimeout(stallTimer); });
+audio.addEventListener('seeking', () => { seekedAt = Date.now(); });
+
+// chosen：账号面板里自己选了流畅（不提示、不记成这次卡过）
+async function downgrade({ chosen = false } = {}) {
+  clearTimeout(stallTimer);
+  if (!chosen) {
+    if (smooth) return;
+    smooth = true;
+    try { sessionStorage.setItem('dj_smooth', '1'); } catch { /* 存不了就只管这一页 */ }
+  }
+  const song = current;
+  if (!song || song.level !== 'lossless') return;
+  if (!chosen) setNotice('网络有点卡，这次先换成流畅（320k）');
+  const at = audio.currentTime || 0;
+  try { await refetch(song, { q: 'exhigh' }); } catch { return; }
+  if (current !== song || mode !== 'song') return;
+  const playing = !audio.paused;
+  song.ladder = null;
+  setSrc(song.direct || song.url, at);
+  applyLoudness(song.gain);
+  if (playing || wantPlay) audio.play().catch(() => {});
+}
+
 $('playBtn').addEventListener('click', () => {
-  ensureAudioGraph();
   wantPlay = true;
   if (!current) return playNext();
   if (audio.paused) {
@@ -440,11 +496,10 @@ $('playBtn').addEventListener('click', () => {
     api('/api/play/stop', { method: 'POST' }).catch(() => {});
   }
 });
-$('nextBtn').addEventListener('click', () => { ensureAudioGraph(); wantPlay = true; playNext(); });
+$('nextBtn').addEventListener('click', () => { wantPlay = true; playNext(); });
 function send() {
   const text = $('moodInput').value.trim();
   if (!text) return;
-  ensureAudioGraph();
   $('moodInput').value = '';
   ask(text);
 }
@@ -513,7 +568,6 @@ async function renderHistory() {
 }
 
 async function playFromHistory(song) {
-  ensureAudioGraph();
   try {
     const info = await api(`/api/song/${song.id}`);
     closeSheet('historyBackdrop');
@@ -553,6 +607,21 @@ $('pairBtn').addEventListener('click', async () => {
     $('pairShow').textContent = code;
     $('pairShow').classList.remove('hidden');
   } catch (error) { setNotice(error.message); }
+});
+
+// 选了就记在服务端（换设备也算）。选流畅：正在放的无损歌立刻换 320k；选无损：这次卡顿降档也不算了，从下一首起要无损
+$('qualitySeg').addEventListener('click', async (event) => {
+  const value = event.target.closest('button')?.dataset.value;
+  if (!value || value === me.quality) return;
+  try {
+    await api('/api/quality', { method: 'POST', body: { quality: value } });
+  } catch (error) { return setNotice(error.message); }
+  me.quality = value;
+  renderMe();
+  if (value === 'smooth') return downgrade({ chosen: true });
+  smooth = false;
+  stalls = 0;
+  try { sessionStorage.removeItem('dj_smooth'); } catch { /* 无痕窗口 */ }
 });
 
 $('memBtn').addEventListener('click', async () => {

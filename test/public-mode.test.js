@@ -5,10 +5,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { createNcmClient, cookieKey, NcmBusyError } from '../server/public/ncm-public.js';
+import { createNcmClient, cookieKey, NcmBusyError, aboveCd } from '../server/public/ncm-public.js';
 import { createMemberStore, encrypt, decrypt, parseVaultKey, MEMORY_IDLE_MS } from '../server/public/members.js';
 import { createGate, parseEngineLoad, createBrain, buildPrompt, normalizeReply } from '../server/public/brain.js';
-import { createPublicApp, syncWithHub, parseCookies, clientIp, deviceLabel, qualityFor } from '../server/public/app.js';
+import { createPublicApp, syncWithHub, parseCookies, clientIp, deviceLabel, qualityFor, directUrl, songView } from '../server/public/app.js';
 import { HubError } from '../server/public/hub-client.js';
 
 const KEY = parseVaultKey('11'.repeat(32));
@@ -581,6 +581,114 @@ test('音质：会员要无损、拿不到再要 exhigh；gain 带回来，试�
   assert.equal((await trial.songUrl(2)).gain, null);
 });
 
+// FLAC 文件头（只够读出采样率和位深）
+function flacHead(sampleRate, bits) {
+  const b = new Uint8Array(64);
+  b.set([0x66, 0x4c, 0x61, 0x43], 0);
+  b[18] = sampleRate >> 12;
+  b[19] = (sampleRate >> 4) & 0xff;
+  b[20] = ((sampleRate & 0xf) << 4) | (1 << 1) | ((bits - 1) >> 4);
+  b[21] = ((bits - 1) & 0xf) << 4;
+  return { ok: true, status: 206, headers: new Headers(), body: new Response(b).body };
+}
+
+test('音质：流畅（账号面板）或这次卡过（smooth）都要 320k；没绑定的一直 320k', () => {
+  const vip = { account: { vip: true } };
+  assert.equal(qualityFor(vip, 'MUSIC_U=a'), 'lossless');
+  assert.equal(qualityFor(vip, 'MUSIC_U=a', true), 'exhigh');
+  assert.equal(qualityFor({ ...vip, quality: 'smooth' }, 'MUSIC_U=a'), 'exhigh');
+  assert.equal(qualityFor({ ...vip, quality: 'lossless' }, 'MUSIC_U=a'), 'lossless');
+  assert.equal(qualityFor(vip, ''), 'exhigh');
+});
+
+test('CD 级判定：FLAC 24 bit / 96 kHz / Hi-Res 档 / 没文件头但码率超 1411k 都算超', () => {
+  assert.equal(aboveCd({ level: 'lossless', quality: { format: 'flac', bits: 16, sampleRate: 44100 } }), false);
+  assert.equal(aboveCd({ level: 'lossless', quality: { format: 'flac', bits: 24, sampleRate: 44100 } }), true);
+  assert.equal(aboveCd({ level: 'lossless', quality: { format: 'flac', bits: 16, sampleRate: 96000 } }), true);
+  assert.equal(aboveCd({ level: 'hires', bitrate: 900000 }), true);
+  assert.equal(aboveCd({ level: 'lossless', bitrate: 1647000 }), true);
+  assert.equal(aboveCd({ level: 'lossless', bitrate: 900000 }), false);
+  assert.equal(aboveCd({ level: 'exhigh', bitrate: 320000, quality: { format: 'mp3' } }), false);
+  assert.equal(aboveCd(null), false);
+});
+
+test('无损只到 CD：网易云给了 24 bit 先找备用音源的 CD 版，没有就要 320k；判过的歌下次直接要 320k', async () => {
+  const asked = [];
+  const owner = fakeOwner();
+  let altBits = 16;
+  owner.find = async (song) => {
+    owner.calls.push(`find:${song.ncmId}:${song.level}`);
+    return { id: 'fk3', url: 'https://a.cdn.example.org/3.flac', level: 'lossless', bitrate: 1000000, quality: { format: 'flac', bitrate: 1000000, sampleRate: 44100, bits: altBits }, source: 'fake' };
+  };
+  const ncm = createNcmClient({
+    base: 'http://ncm.test', owner, sleep: async () => {},
+    fetchFn: async (url) => {
+      if (String(url).endsWith('.flac')) return flacHead(44100, 24);
+      const u = new URL(url);
+      const level = u.searchParams.get('level');
+      asked.push(`${u.searchParams.get('id')}:${level}`);
+      if (level === 'lossless') return jsonRes({ data: [{ url: 'http://m7.music.126.net/a.flac', level: 'lossless', type: 'flac', br: 1290000, sr: 44100 }] });
+      return jsonRes({ data: [{ url: 'http://m7.music.126.net/a.mp3', level: 'exhigh', type: 'mp3', br: 320000, sr: 44100 }] });
+    },
+  });
+  const song = { id: 65538, title: '晴天', artist: '周杰伦' };
+  const viaAlt = await ncm.songUrl(65538, { level: 'lossless', cookie: 'MUSIC_U=a', song });
+  assert.equal(viaAlt.url, 'https://a.cdn.example.org/3.flac');
+  assert.equal(viaAlt.quality.bits, 16);
+  assert.deepEqual(owner.calls, ['find:65538:lossless']);
+  // 第二次：已知超 CD，直接要 320k，不再问无损、不再找备用音源
+  const again = await ncm.songUrl(65538, { level: 'lossless', cookie: 'MUSIC_U=a', song });
+  assert.equal(again.level, 'exhigh');
+  assert.deepEqual(asked, ['65538:lossless', '65538:exhigh']);
+  assert.equal(owner.calls.length, 1);
+  // 备用音源也是 24 bit：要 320k
+  altBits = 24;
+  const other = await ncm.songUrl(65539, { level: 'lossless', cookie: 'MUSIC_U=a', song: { ...song, id: 65539 } });
+  assert.equal(other.level, 'exhigh');
+  assert.equal(other.bitrate, 320000);
+  // CD 版直接给，不找备用音源
+  const cd = createNcmClient({
+    base: 'http://ncm.test', owner, sleep: async () => {},
+    fetchFn: async (url) => (String(url).endsWith('.flac') ? flacHead(44100, 16) : jsonRes({ data: [{ url: 'http://m7.music.126.net/b.flac', level: 'lossless', type: 'flac', br: 900000, sr: 44100 }] })),
+  });
+  owner.calls.length = 0;
+  const flac = await cd.songUrl(7, { level: 'lossless', cookie: 'MUSIC_U=a', song: { id: 7, title: 'x', artist: 'y' } });
+  assert.equal(flac.level, 'lossless');
+  assert.equal(flac.quality.bits, 16);
+  assert.deepEqual(owner.calls, []);
+});
+
+test('无损只到 CD：网易云没搜到、整首用备用音源时，24 bit 也降 320k', async () => {
+  const owner = fakeOwner();
+  owner.search = async () => [];
+  owner.find = async (song) => { owner.calls.push(`find:${song.level}`); return { id: 'fk3', title: '晴天', artist: '周杰伦', url: 'https://a.cdn.example.org/3.flac', level: 'lossless', bitrate: 1647000, quality: { format: 'flac', bitrate: 1647000, sampleRate: 44100, bits: 24 }, source: 'fake' }; };
+  const ncm = createNcmClient({
+    base: 'http://ncm.test', owner, sleep: async () => {},
+    fetchFn: async (url) => (new URL(url).pathname === '/search' ? jsonRes({ result: { songs: [] } }) : jsonRes({})),
+  });
+  const song = await ncm.resolve({ title: '晴天', artist: '周杰伦' }, { cookie: 'MUSIC_U=a', memberId: 'm1', level: 'lossless' });
+  assert.equal(song.id, 'fk3');
+  assert.equal(song.level, 'exhigh');
+  assert.equal(song.url, 'https://a.cdn.example.org/3.mp3');
+  assert.deepEqual(owner.calls, ['find:lossless', 'url:fk3:exhigh:']);
+  // 一首 CD 级的照常给无损
+  owner.calls.length = 0;
+  owner.find = async () => ({ id: 'fk4', title: '十年', artist: '陈奕迅', url: 'https://a.cdn.example.org/4.flac', level: 'lossless', bitrate: 848000, quality: { format: 'flac', bits: 16, sampleRate: 44100 }, source: 'fake' });
+  const cd = await ncm.resolve({ title: '十年', artist: '陈奕迅' }, { cookie: 'MUSIC_U=a', memberId: 'm1', level: 'lossless' });
+  assert.equal(cd.level, 'lossless');
+  assert.deepEqual(owner.calls, []);
+});
+
+test('直链给网页：只给 https（http 换成 https），别的不给', () => {
+  assert.equal(directUrl('http://m701.music.126.net/a.flac?x=1'), 'https://m701.music.126.net/a.flac?x=1');
+  assert.equal(directUrl('https://a.cdn.example.org/3.mp3'), 'https://a.cdn.example.org/3.mp3');
+  assert.equal(directUrl('ftp://x/y'), '');
+  assert.equal(directUrl(''), '');
+  assert.equal(songView({ id: 1, title: 't', url: 'http://m7.music.126.net/a.mp3' }).direct, 'https://m7.music.126.net/a.mp3');
+  assert.equal(songView({ id: 1, title: 't', url: 'http://m7.music.126.net/a.mp3' }).url, '/media/1');
+  assert.equal('direct' in songView({ id: 1, title: 't' }), false);
+});
+
 test('音频同源代理：网页只拿到 /media/<id>；透传 Range；直链按人记住不重复问；没设备 401', async () => {
   const upstream = [];
   const fetchFn = async (url, init) => {
@@ -604,6 +712,46 @@ test('音频同源代理：网页只拿到 /media/<id>；透传 Range；直链�
     // 没记住的歌现取直链（songUrl）
     await (await fetch(`${t.base}/media/99`, { headers: { Cookie: cookie } })).arrayBuffer();
     assert.equal(upstream.at(-1).url, 'https://m.music.126.net/r.mp3');
+  } finally { t.close(); }
+});
+
+test('音质设置：账号面板选流畅记下来（清空记忆不丢）；卡过（smooth / q=exhigh）按 320k 取；歌带 https 直链', async () => {
+  const levels = [];
+  const t = await startApp({
+    ncm: {
+      songUrl: async (id, o) => (levels.push(`url:${o.level}`), { url: `http://m.music.126.net/${id}.flac`, level: o.level, bitrate: 900000 }),
+      playById: async (song, o) => (levels.push(`id:${o.level}`), { ...song, url: `http://m.music.126.net/${song.id}.mp3`, playable: true }),
+      taste: async () => null,
+      dailyRecommend: async () => [{ id: 31, title: '推荐一', artist: 'R' }, { id: 32, title: '推荐二', artist: 'R' }],
+    },
+  });
+  try {
+    t.hub.addMember('mem_00000001');
+    const cookie = await t.join('mem_00000001');
+    t.members.setCookie('mem_00000001', 'MUSIC_U=a');
+    t.members.saveMemory('mem_00000001', { ...t.members.memory('mem_00000001'), account: { uid: 1, vip: true } });
+    assert.equal((await t.req('/api/me', { cookie })).data.quality, 'lossless');
+    const song = await t.req('/api/song/60', { cookie });
+    assert.equal(song.data.url, '/media/60');
+    assert.equal(song.data.direct, 'https://m.music.126.net/60.flac');
+    await t.req('/api/song/61?q=exhigh', { cookie });
+    assert.deepEqual(levels, ['url:lossless', 'url:exhigh']);
+    const auto = await t.req('/api/chat', { method: 'POST', body: { text: '', smooth: true }, cookie });
+    assert.ok(auto.data.songs.length);
+    assert.ok(auto.data.songs.every((s) => s.direct.startsWith('https://')));
+    assert.ok(levels.slice(2).every((l) => l.endsWith(':exhigh')));
+    // 流畅：记下来，清空记忆也还在
+    assert.equal((await t.req('/api/quality', { method: 'POST', body: { quality: 'smooth' }, cookie })).data.quality, 'smooth');
+    await t.req('/api/memory/clear', { method: 'POST', cookie });
+    assert.equal((await t.req('/api/me', { cookie })).data.quality, 'smooth');
+    levels.length = 0;
+    await t.req('/api/song/62', { cookie });
+    assert.deepEqual(levels, ['url:exhigh']);
+    await t.req('/api/quality', { method: 'POST', body: { quality: 'lossless' }, cookie });
+    assert.equal((await t.req('/api/me', { cookie })).data.quality, 'lossless');
+    // 直链只放行 https 媒体
+    const csp = (await t.req('/api/me', { cookie })).headers.get('content-security-policy');
+    assert.match(csp, /media-src 'self' blob: https:;/);
   } finally { t.close(); }
 });
 
@@ -741,7 +889,7 @@ function fakeOwner() {
     calls,
     async search(keywords) { calls.push(`search:${keywords}`); return [{ id: 186016, title: '晴天', artist: '周杰伦', album: '叶惠美', duration: 269, fee: 1 }]; },
     async songUrl(song) { calls.push(`url:${song.id}:${song.level}:${song.title || ''}`); return song.id === 'fk3' ? { url: 'https://a.cdn.example.org/3.mp3', level: 'exhigh', bitrate: 320000, source: 'fake' } : { url: 'https://m701.music.126.net/full.mp3', level: 'exhigh', bitrate: 320000, gain: -3 }; },
-    async find(song) { calls.push(`find:${song.ncmId || ''}:${song.title}`); return { id: 'fk3', title: '晴天', artist: '周杰伦', duration: 269, url: 'https://a.cdn.example.org/3.mp3', level: 'lossless', bitrate: 1650000, source: 'fake' }; },
+    async find(song) { calls.push(`find:${song.ncmId || ''}:${song.title}`); return { id: 'fk3', title: '晴天', artist: '周杰伦', duration: 269, url: 'https://a.cdn.example.org/3.flac', level: 'lossless', bitrate: 900000, quality: { format: 'flac', bitrate: 900000, sampleRate: 44100, bits: 16 }, source: 'fake' }; },
     async lyric(id) { calls.push(`lyric:${id}`); return '[00:00.00]x'; },
   };
 }
@@ -788,7 +936,7 @@ test('绑定的人：用自己的登录态；只有试听时经主实例找备�
   });
   const song = await ncm.resolve({ title: '晴天', artist: '周杰伦' }, { cookie: 'MUSIC_U=friend', memberId: 'm2', level: 'lossless' });
   assert.equal(song.id, 186016);
-  assert.equal(song.url, 'https://a.cdn.example.org/3.mp3');
+  assert.equal(song.url, 'https://a.cdn.example.org/3.flac');
   assert.equal(song.level, 'lossless');
   assert.deepEqual(owner.calls, ['find:186016:晴天']);
 });

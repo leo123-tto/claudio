@@ -1,14 +1,18 @@
-// 公用版的同源音频代理：网页只放 /media/<歌 id>，直链由服务端按这个人的登录态去取。
+// 公用版的同源音频代理（退路）：/media/<歌 id>，直链由服务端按这个人的登录态去取。
 //
-// - 整站只剩 https 同源资源（有的手机浏览器见到第三方媒体就在地址栏亮警告），Web Audio 也能直接接（统一响度要用）。
+// - 11-23 傍晚前音频全走这里（当时为了整站同源、接 Web Audio）；现在网页先用 https 直链，响度改用 audio.volume。
 // - 不收 URL 参数，只收歌 id：没法拿它去代理别的地址。
 // - 直链按「人 + 歌 + 档」记 10 分钟，浏览器分段（Range）来取时不再问网易云；上游说过期了就重取一次。
-// - 先放 768 KB 让歌快点起来，之后按码率 2 倍限速（家里上行要分给所有人）；每人同时最多 3 路，断开就停上游。
+// - 网页优先直接从音乐 CDN 取（见 app.js 的 directUrl），这里是退路：直链失效、浏览器直连放不了时才走。
+// - 先放 20 秒音频（至少 2 MB）让歌快点起来、攒够缓冲，之后按码率 4 倍限速（家里上行要分给所有人；
+//   经 Cloudflare 隧道绕美国，带宽忽高忽低，2 倍时一掉速就卡）；每人同时最多 3 路，断开就停上游。
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 const URL_TTL = 10 * 60_000;
-const BURST = 768 * 1024;
+const BURST = 2 * 1024 * 1024;
+const BURST_SECONDS = 20;
+const RATE_X = 4;
 const PASS_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag'];
 
 export function throttle(source, { bytesPerSec, burst = BURST, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
@@ -54,7 +58,7 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
     const id = String(req.params.id);
     if (!/^(\d{1,15}|[a-z]{2,4}\d{1,20})$/.test(id)) return res.status(400).end();
     const memberId = req.member.id;
-    const level = req.query.q === 'exhigh' ? 'exhigh' : qualityFor(members.memory(memberId), members.getCookie(memberId));
+    const level = qualityFor(members.memory(memberId), members.getCookie(memberId), req.query.q === 'exhigh');
     const open = streams.get(memberId) || 0;
     if (open >= maxStreams) return res.status(429).end();
     streams.set(memberId, open + 1);
@@ -83,8 +87,10 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
         if (value) res.setHeader(name, value);
       }
       res.setHeader('Cache-Control', 'private, no-store');
-      const bytesPerSec = Math.max(64 * 1024, ((entry.bitrate || 320_000) / 8) * 2);
-      await pipeline(throttle(Readable.fromWeb(upstream.body), { bytesPerSec }), res);
+      const audioBytesPerSec = (entry.bitrate || 320_000) / 8;
+      const bytesPerSec = Math.max(128 * 1024, audioBytesPerSec * RATE_X);
+      const burst = Math.max(BURST, audioBytesPerSec * BURST_SECONDS);
+      await pipeline(throttle(Readable.fromWeb(upstream.body), { bytesPerSec, burst }), res);
     } catch (error) {
       if (controller.signal.aborted) return;
       log('media-failed', memberId, error.code || error.name);
@@ -93,11 +99,11 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
     }
   }
 
-  // 从「最近听过」点回去放：先取一次直链（顺带拿到响度和档位），网页再从 /media 取
-  async function meta(memberId, id) {
-    const level = qualityFor(members.memory(memberId), members.getCookie(memberId));
-    const entry = await lookup(memberId, id, level, false);
-    return entry && { gain: entry.gain, level: entry.level, bitrate: entry.bitrate, ...(entry.quality ? { quality: entry.quality } : {}) };
+  // 从「最近听过」点回去放、直链过期重取、卡顿降到 320k：先取一次直链（顺带拿到响度和档位），网页直连或从 /media 取
+  async function meta(memberId, id, { smooth = false, fresh = false } = {}) {
+    const level = qualityFor(members.memory(memberId), members.getCookie(memberId), smooth);
+    const entry = await lookup(memberId, id, level, fresh);
+    return entry && { gain: entry.gain, level: entry.level, bitrate: entry.bitrate, url: entry.url, ...(entry.quality ? { quality: entry.quality } : {}) };
   }
 
   return { remember, handle, meta, streams };

@@ -4,7 +4,7 @@ import express from 'express';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { BrainBusyError } from './brain.js';
-import { NcmBusyError } from './ncm-public.js';
+import { NcmBusyError, toHttps } from './ncm-public.js';
 import { HubError } from './hub-client.js';
 import { createMediaProxy } from './media.js';
 import { createMixer, shuffle, songKey } from './mix.js';
@@ -14,9 +14,17 @@ import { appVersion } from '../version.js';
 
 const COOKIE = 'dj_dev';
 
-// 音质：绑了网易云且是会员就要无损，其余要 exhigh（320k，没绑定的免费歌也能拿到）；没有这档网易云自己降
-export function qualityFor(memory, cookie) {
-  return cookie && memory?.account?.vip ? 'lossless' : 'exhigh';
+// 音质：绑了网易云且是会员默认要无损（只到 CD 级，见 ncm-public.js 的 songUrl），其余要 exhigh（320k，没绑定的免费歌也能拿到）；
+// 账号面板选了「流畅」，或这次打开网页卡顿自动降档（smooth，网页每次请求带上）也要 320k。没有这档网易云自己降
+export function qualityFor(memory, cookie, smooth = false) {
+  return cookie && memory?.account?.vip && !smooth && memory?.quality !== 'smooth' ? 'lossless' : 'exhigh';
+}
+
+// 浏览器直接去音乐 CDN 取（国内 CDN 首字节几十毫秒；经家里盒子和 Cloudflare 隧道要绕美国，1–2 秒、带宽忽高忽低）。
+// 只给 https 直链（不带 cookie）；直链失效或放不了，网页再退回同源 /media 代理
+export function directUrl(url) {
+  const text = toHttps(url);
+  return /^https:\/\/[\w.-]+(:\d+)?\//.test(text) && text.length < 2000 ? text : '';
 }
 
 // 封面只认网易云图床的 https 地址
@@ -38,6 +46,7 @@ export function songView(song) {
     id: song.id, title: song.title, artist: song.artist, url: `/media/${song.id}`, duration: song.duration || 0,
     level: song.level || '', bitrate: song.bitrate || 0, gain: song.gain ?? null, cover: song.cover || '',
     ...(song.quality ? { quality: song.quality } : {}),
+    ...(directUrl(song.url) ? { direct: directUrl(song.url) } : {}),
   };
 }
 const COOKIE_MAX_AGE = 400 * 24 * 3600; // 浏览器允许的上限
@@ -142,7 +151,7 @@ export function createPublicApp({
       'Referrer-Policy': 'no-referrer',
       'X-Frame-Options': 'DENY',
       'Strict-Transport-Security': 'max-age=15552000',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self' data: https://*.music.126.net; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self' data: https://*.music.126.net; media-src 'self' blob: https:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
     });
     next();
   });
@@ -247,6 +256,7 @@ export function createPublicApp({
       canAsk: members.bound(m.id) || Boolean(ncm.borrowsOwner),
       nickname: mem.account?.nickname || '',
       vip: Boolean(mem.account?.vip),
+      quality: mem.quality === 'smooth' ? 'smooth' : 'lossless',
       prefs: mem.prefs,
     };
   };
@@ -331,8 +341,8 @@ export function createPublicApp({
   }
 
   // 自动续播不搜歌：绑定的人按「红心 4 : 推荐 4 : 新歌 2」混着来（见 mix.js），没绑定的从榜单里的免费歌挑（都是已知 id，只问直链）
-  async function autoSongs(m, memory, cookie) {
-    const level = qualityFor(memory, cookie);
+  async function autoSongs(m, memory, cookie, smooth) {
+    const level = qualityFor(memory, cookie, smooth);
     const playById = (song, options) => ncm.playById(song, options);
     let picked;
     if (cookie) {
@@ -376,6 +386,7 @@ export function createPublicApp({
     const text = String(req.body?.text || '').trim().slice(0, 200);
     const auto = !text;
     const drive = req.body?.drive === true; // 驾驶模式：DJ 只说一句
+    const smooth = req.body?.smooth === true; // 这次打开网页卡过，降到 320k
     const cookie = members.getCookie(m.id);
     // 盒子出口匿名搜索一律 405，会连累主实例：没有默认音源（没配 NCM_SHARED_URL）时，没绑定的不开放点歌，也不扣次数
     if (!auto && !cookie && !ncm.borrowsOwner) {
@@ -386,7 +397,7 @@ export function createPublicApp({
       const quota = await hub.consume(m.id, auto ? 'song' : 'chat');
       const memory = members.memory(m.id);
       if (auto) {
-        const picked = await autoSongs(m, memory, cookie);
+        const picked = await autoSongs(m, memory, cookie, smooth);
         // 选歌要好几秒，期间「开始放」可能记了最近听过：只合并这里改过的字段，别拿旧快照整份覆盖
         const { taste, deck, rec, simi, fresh, freshTried } = memory;
         members.saveMemory(m.id, { ...members.memory(m.id), taste, deck, rec, simi, fresh, freshTried });
@@ -409,7 +420,7 @@ export function createPublicApp({
         reply = { say: '', intent: 'recommend', play: await fallbackCandidates(text, { ...memory, cookie, memberId: m.id }), memoryCandidates: [] };
       }
       let picked = { songs: [], notice: '' };
-      if (reply.intent === 'recommend') picked = await pickSongs(reply.play, { cookie, memberId: m.id, bound: true, level: qualityFor(memory, cookie) });
+      if (reply.intent === 'recommend') picked = await pickSongs(reply.play, { cookie, memberId: m.id, bound: true, level: qualityFor(memory, cookie, smooth) });
       // 推荐了但一首都放不了，就别让 DJ 说「来了」，只给提示
       const nothing = reply.intent === 'recommend' && !picked.songs.length;
       const fullSay = nothing ? '' : (degraded ? 'DJ 这会儿有点忙，先按你说的直接找了两首。' : reply.say);
@@ -474,14 +485,15 @@ export function createPublicApp({
     } catch (error) { sendError(res, error); }
   });
 
-  // 从「最近听过」点回去放
+  // 从「最近听过」点回去放；直链过期重取（fresh=1）；卡顿后要 320k（q=exhigh）
   app.get('/api/song/:id', auth, async (req, res) => {
     const id = String(req.params.id);
     if (!SONG_ID.test(id)) return res.status(400).json({ error: 'invalid' });
     try {
-      const info = await media.meta(req.member.id, parseSongId(id));
+      const info = await media.meta(req.member.id, parseSongId(id), { smooth: req.query.q === 'exhigh', fresh: req.query.fresh === '1' });
       if (!info) return res.status(404).json({ error: 'gone', message: '这首现在放不了了' });
-      res.json({ id: parseSongId(id), url: `/media/${id}`, ...info });
+      const { url: cdn, ...rest } = info;
+      res.json({ id: parseSongId(id), url: `/media/${id}`, ...rest, ...(directUrl(cdn) ? { direct: directUrl(cdn) } : {}) });
     } catch (error) { sendError(res, error); }
   });
 
@@ -537,8 +549,17 @@ export function createPublicApp({
   });
 
   app.post('/api/memory/clear', auth, (req, res) => {
+    const { quality } = members.memory(req.member.id);
     members.clearMemory(req.member.id);
+    if (quality) members.saveMemory(req.member.id, { ...members.memory(req.member.id), quality }); // 音质是设置，不算记忆
     res.json({ ok: true });
+  });
+
+  // 账号面板的音质：流畅（320k）/ 无损（CD），记在这个人的记忆里，换设备也算
+  app.post('/api/quality', auth, (req, res) => {
+    const quality = req.body?.quality === 'smooth' ? 'smooth' : 'lossless';
+    members.saveMemory(req.member.id, { ...members.memory(req.member.id), quality });
+    res.json({ ok: true, quality });
   });
 
   // ---- 页面 ----

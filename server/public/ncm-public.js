@@ -32,6 +32,16 @@ export function toHttps(url) {
   return String(url || '').replace(/^http:\/\//i, 'https://');
 }
 
+// 超过 CD 级：FLAC 位深 >16 或采样率 >48 kHz；没读到文件头时按码率判（16 bit / 44.1 kHz 立体声最多 1411 kbps）
+export function aboveCd(audio) {
+  if (!audio) return false;
+  if (['hires', 'jymaster', 'jyeffect', 'sky'].includes(audio.level)) return true;
+  const q = audio.quality || {};
+  if (q.format !== 'flac' && audio.level !== 'lossless') return false;
+  if (q.bits || q.sampleRate) return (q.bits || 16) > 16 || (q.sampleRate || 44_100) > 48_000;
+  return (Number(audio.bitrate) || 0) > 1_411_200;
+}
+
 // 网易云歌曲对象（song/detail、歌单、每日推荐、FM 都是这个形状）→ 公用版用的样子
 export function trackView(s) {
   return {
@@ -126,6 +136,7 @@ export function createNcmClient({
   // 放不了的（只有试听 / 没直链）按「歌 + 账号」记 6 小时，下次直接跳过，不再问网易云
   const deadSongs = new Map();
   const DEAD_TTL = 6 * 3600_000;
+  const overCd = new Map(); // 歌 id -> 到期时间：无损档拿到的是 24 bit / Hi-Res，要 320k
   const searchSentAt = [];
   // 按接口冷却（和个人版一样）：搜索被限流时扫码登录照样能用
   const pausedUntil = new Map();
@@ -268,9 +279,29 @@ export function createNcmClient({
     ...(cleanQuality(audio.quality) ? { quality: cleanQuality(audio.quality) } : {}),
   };
 
+  // 公用版的「无损」只到 CD 级（16 bit、≤48 kHz）：音频走家里上行，Hi-Res 带不动。
+  // 网易云和备用音源的「无损」档拿到的是哪种母带就给哪种（实测一半是 24 bit），所以拿到后看文件头再定：
+  // 超了先找备用音源有没有同一首的 CD 版，没有就要 320k。判过超的歌记一天，下次直接要 320k。
+  async function songUrl(id, options = {}) {
+    if (options.level !== 'lossless') return rawSongUrl(id, options);
+    const key = String(id);
+    const hit = overCd.get(key);
+    if (hit && hit > now()) return rawSongUrl(id, { ...options, level: 'exhigh' });
+    const audio = await rawSongUrl(id, options);
+    if (!aboveCd(audio)) return audio;
+    overCd.set(key, now() + DEAD_TTL * 4);
+    if (overCd.size > 5000) overCd.delete(overCd.keys().next().value);
+    const meta = metaOf(id, options.song);
+    if (owner && /^\d+$/.test(key) && !audio.source && meta.title) {
+      const alt = altView(await viaOwner(owner.find({ ncmId: key, level: 'lossless', ...meta })).catch(() => null));
+      if (alt && !alt.trial && !aboveCd(alt)) return alt;
+    }
+    return (await rawSongUrl(id, { ...options, level: 'exhigh' })) || audio;
+  }
+
   // 按 id 取直链。绑定的人用自己的登录态，放不了（灰 / 只有试听）再经老板实例找备用音源；
   // 没绑定的整个交给老板实例（老板的登录态，放不了它自己会找备用音源）。
-  async function songUrl(id, { level = 'exhigh', song = null, ...options } = {}) {
+  async function rawSongUrl(id, { level = 'exhigh', song = null, ...options } = {}) {
     const meta = metaOf(id, song);
     if (!/^\d+$/.test(String(id))) return owner ? altView(await viaOwner(owner.songUrl({ id: String(id), level }))) : null;
     if (!options.cookie && owner) {
@@ -292,7 +323,13 @@ export function createNcmClient({
     if (!owner || !title) return null;
     const found = await viaOwner(owner.find({ title, artist, level })).catch(() => null);
     if (!found?.url) return null;
-    return { id: found.id, title: found.title, artist: found.artist, album: found.album || '', duration: found.duration || 0, cover: '', ...altView(found), playable: true };
+    let audio = altView(found);
+    // 无损只到 CD（同 songUrl）：备用音源给了 24 bit 就按它的 id 要 320k
+    if (level === 'lossless' && aboveCd(audio)) {
+      overCd.set(String(found.id), now() + DEAD_TTL * 4);
+      audio = altView(await viaOwner(owner.songUrl({ id: String(found.id), level: 'exhigh' })).catch(() => null)) || audio;
+    }
+    return { id: found.id, title: found.title, artist: found.artist, album: found.album || '', duration: found.duration || 0, cover: '', ...audio, playable: true };
   }
 
   // 把 {title, artist} 解析成能放的歌。allowTrial=false 时跳过只有试听的版本。

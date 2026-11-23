@@ -292,6 +292,13 @@
             <h3>网易云</h3>
             <div class="row"><span id="ncmState"></span><button class="btn-line" id="ncmBtn" type="button"></button></div>
           </section>
+          <section class="group hidden" id="qualityGroup">
+            <h3>音质</h3>
+            <div class="seg" id="qualitySeg" role="radiogroup" aria-label="音质">
+              <button type="button" role="radio" data-value="smooth" aria-checked="false">流畅（320k）</button>
+              <button type="button" role="radio" data-value="lossless" aria-checked="true">无损（CD）</button>
+            </div>
+          </section>
           <section class="group">
             <h3>设备<span class="count" id="devState"></span></h3>
             <div class="row"><span class="dim">在另一台设备上输入配对码</span><button class="btn-line" id="pairBtn" type="button">添加设备</button></div>
@@ -329,6 +336,6 @@
       </section>
     </div>
 
-    <script src="/boot.js?v=4" type="module"></script>
+    <script src="/boot.js?v=5" type="module"></script>
   </body>
 </html>
