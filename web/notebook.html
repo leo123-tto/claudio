@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex" />
+  <title>Vera 的笔记本 · Claudio</title>
+  <link rel="icon" href="/favicon.png" />
+  <link rel="stylesheet" href="/styles.css?v=16" />
+  <link rel="stylesheet" href="/notebook.css?v=1" />
+</head>
+<body class="nb-body">
+  <header class="nb-head">
+    <a class="nb-back" href="/" aria-label="回到电台">←<span>回到电台</span></a>
+    <div class="nb-title">
+      <h1>Vera 的笔记本</h1>
+      <p>她记得你的事都在这里。你可以改、可以删，删掉就是真的删掉。</p>
+    </div>
+    <p class="nb-inline" id="nbInline" role="status"></p>
+  </header>
+
+  <main class="nb-main">
+    <section class="nb-add" aria-label="记一条">
+      <div class="nb-add-row">
+        <select id="nbKind" aria-label="哪一栏"></select>
+        <input id="nbText" type="text" maxlength="120" placeholder="她该记住什么？一句话就好" autocomplete="off" />
+      </div>
+      <div class="nb-add-row">
+        <input id="nbQuote" type="text" maxlength="240" placeholder="你的原话（可不填）" autocomplete="off" />
+        <input id="nbSongs" type="text" maxlength="120" placeholder="关联的歌：歌名 / 歌手（可不填）" autocomplete="off" />
+        <button class="nb-btn primary" id="nbAdd" type="button">记下</button>
+      </div>
+    </section>
+
+    <p class="nb-note">标了「她不会主动提」的，只有你先提起她才会接。按了「别再提」的，她不会再说，但仍然留在这里。</p>
+
+    <section class="nb-cols" id="nbCols" aria-label="笔记本四栏"></section>
+    <p class="nb-empty hidden" id="nbEmpty">还是空的。陪她听几次，或者自己想让她记住什么，就从上面记一条。</p>
+  </main>
+
+  <template id="nbCard">
+    <article class="nb-card">
+      <div class="nb-card-top">
+        <span class="nb-date"></span>
+        <span class="nb-tags"></span>
+      </div>
+      <p class="nb-text"></p>
+      <p class="nb-quote hidden"></p>
+      <div class="nb-songs"></div>
+      <div class="nb-actions">
+        <button type="button" data-act="quote">原话</button>
+        <button type="button" data-act="edit">改</button>
+        <button type="button" data-act="mute">别再提</button>
+        <button type="button" data-act="delete" class="danger">删</button>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="/notebook.js?v=1"></script>
+</body>
+</html>

@@ -59,7 +59,10 @@ function renderMe() {
   const canAsk = me.canAsk ?? me.bound;
   $('moodInput').placeholder = canAsk ? '想听点什么' : '绑定网易云后可以点歌';
   $('bindTip').classList.toggle('hidden', Boolean(canAsk));
-  $('memState').textContent = me.prefs?.length ? me.prefs.join('、') : '还没记什么';
+  // 笔记本里的条数（个人版的记忆面板也走同一个说法）；老服务没这个字段时退回老 prefs
+  $('memState').textContent = typeof me.notesCount === 'number'
+    ? (me.notesCount ? `她记着你 ${me.notesCount} 件事` : '还没记什么')
+    : (me.prefs?.length ? me.prefs.join('、') : '还没记什么');
   // 音质只有绑定的会员能选（别的一直是 320k）
   $('qualityGroup').classList.toggle('hidden', !(me.bound && me.vip));
   for (const b of $('qualitySeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (me.quality || 'lossless')));
@@ -137,6 +140,7 @@ function setNowPlaying(song, title = '') {
   covers.paintThumbs(sized(song?.cover, 600));
   covers.setBackdrop(sized(song?.cover, 600));
   document.title = song?.title ? `${song.title} · Claudio` : 'Claudio';
+  try { window.dispatchEvent(new CustomEvent('claudio:now', { detail: song?.id ? song : null })); } catch { /* 好友互荐（friends.js）出错不影响放歌 */ }
 }
 
 setNowPlaying(null, '按下播放，或者说说想听什么');
@@ -165,10 +169,33 @@ function showStage(which) {
   if (lyric) { lyricView?.recenter(); lyricClock.refresh(); }
 }
 // DJ 说一句：念口播时一直亮着，聊天回话亮几秒再回歌词
-function showDj(text, hold = 0) {
+// 她提起了一件旧事：小角标，点开是那条记忆和你的原话。
+function renderDjMemory(ref) {
+  const host = $('djLine');
+  host.querySelector('.say-memory')?.remove();
+  if (!ref) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'say-memory';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'say-memory-btn';
+  btn.textContent = '她想起了你说的那件事';
+  const detail = document.createElement('div');
+  detail.className = 'say-memory-detail hidden';
+  const date = new Date(ref.at);
+  detail.textContent = [ref.text, ref.quote ? `你的原话：${ref.quote}` : '',
+    Number.isNaN(date.getTime()) ? '' : `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getDate()).padStart(2, '0')}`]
+    .filter(Boolean).join('\n');
+  btn.addEventListener('click', (event) => { event.stopPropagation(); detail.classList.toggle('hidden'); });
+  wrap.append(btn, detail);
+  host.appendChild(wrap);
+}
+
+function showDj(text, hold = 0, ref = null) {
   clearTimeout(djTimer);
   if (!text) return;
   $('djSay').textContent = text;
+  renderDjMemory(ref);
   showStage('dj');
   if (hold) djTimer = setTimeout(() => { if (mode === 'song' && current) showStage('lyric'); }, hold);
 }
@@ -260,7 +287,8 @@ async function ask(text = '') {
     setNotice(out.notice || '');
     if (out.songs.length) {
       retries = 0;
-      if (out.voice || out.say) Object.assign(out.songs[0], { voice: out.voice || '', say: out.say || '' });
+      if (out.voice || out.say) Object.assign(out.songs[0], { voice: out.voice || '', say: out.say || '',
+        ...(out.memoryRef ? { memoryRef: out.memoryRef } : {}) });
       // 点歌或空档时最多等 4 秒口播；正在放时预取的那批还早，后台慢慢取
       const voiceReady = prefetchVoice(out.songs[0]);
       for (const song of out.songs.slice(1)) prefetchVoice(song); // 后面几首的报幕是后台现写的，慢慢取
@@ -268,7 +296,7 @@ async function ask(text = '') {
       queue = text ? out.songs : [...queue, ...out.songs];
       if (text || !current) { wantPlay = true; playNext(); }
     } else if (text) {
-      if (out.say) showDj(out.say, 8000);
+      if (out.say) showDj(out.say, 8000, out.memoryRef || null);
       else {
         showStage(current ? 'lyric' : 'none');
         if (!out.notice) setNotice('这次没找到能放的歌，换个说法试试');
@@ -346,13 +374,13 @@ async function playNext() {
   bindLyrics(current);
   if (current.voiceUrl) {
     mode = 'voice';
-    showDj(current.say || '');
+    showDj(current.say || '', 0, current.memoryRef || null);
     audio.src = current.voiceUrl;
     applyLoudness(null);
     voiceTimer = setTimeout(() => { if (wantPlay) startSong(); }, 15000); // 念不完也不卡歌（按了暂停就不切）
     try { await audio.play(); } catch (error) { startSong(error); }
   } else {
-    if (current.say) showDj(current.say, 6000); else showStage('lyric');
+    if (current.say) showDj(current.say, 6000, current.memoryRef || null); else showStage('lyric');
     await startSong();
   }
   if (queue.length === 0) ask('');
@@ -393,7 +421,7 @@ audio.addEventListener('playing', () => {
   delete $('playBtn').dataset.takeover;
   if (mode === 'song' && current && !current.reported) {
     current.reported = true;
-    api('/api/play/started', { method: 'POST', body: { id: current.id, title: current.title, artist: current.artist, cover: current.cover } }).catch(() => {});
+    api('/api/play/started', { method: 'POST', body: { id: current.id, title: current.title, artist: current.artist, cover: current.cover, ...(current.rec ? { rec: current.rec.id } : {}) } }).catch(() => {});
   }
 });
 audio.addEventListener('pause', () => setPlaying(false));
@@ -571,7 +599,14 @@ async function renderHistory() {
       paintHeart(fav, Boolean(song.liked));
       if (current?.id === song.id) { current.liked = song.liked; renderFav(); }
     });
-    li.append(img, play, fav);
+    // 推荐给好友（开了好友才露出来，点了交给 friends.js）
+    const rec = document.createElement('button');
+    rec.type = 'button';
+    rec.className = 'icon-btn rec-btn';
+    rec.setAttribute('aria-label', '推荐给好友');
+    rec.innerHTML = '<svg class="ico"><use href="#i-share"/></svg>';
+    rec.dataset.song = JSON.stringify({ id: song.id, title: song.title, artist: song.artist, cover: song.cover || '' });
+    li.append(img, play, fav, rec);
     list.append(li);
   }
 }
@@ -652,6 +687,7 @@ $('adultSeg').addEventListener('click', async (event) => {
 $('memBtn').addEventListener('click', async () => {
   await api('/api/memory/clear', { method: 'POST' }).catch(() => {});
   me.prefs = [];
+  me.notesCount = 0;
   renderMe();
 });
 

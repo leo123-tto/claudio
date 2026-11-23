@@ -24,7 +24,8 @@ test('品味摘要保留锚点，并要求继续掺新风格、流行和老歌',
   assert.match(text, /新风格/);
   assert.match(text, /当下流行/);
   assert.match(text, /老歌/);
-  assert.match(text, /晚上喜欢轻一点/);
+  // 记忆文字不再进品味摘要（唯一的记忆来源是笔记本，删掉的不能从摘要漏回来）
+  assert.doesNotMatch(text, /晚上喜欢轻一点/);
   assert.doesNotMatch(text, /不该当喜欢/);
 });
 

@@ -330,6 +330,7 @@ function artistMatches(hitArtist, want) {
 }
 
 // 给了歌手就只认这位歌手的版本：网易云没版权的歌（比如周杰伦）搜出来全是翻唱，宁可换一首也不拿翻唱顶替。
+// 给了歌名也只认这首：搜「枫 周杰伦」时网易云会给他的合唱 Live、挂他名字的上传，那不是这首。
 // 剩下的按歌名对上排前；Live、伴奏、DJ、各种「xx版」没点名就往后排。同分保持网易云原顺序。
 export function rankHits(hits = [], { title = '', artist = '' } = {}) {
   const wantTitle = baseTitle(title);
@@ -343,8 +344,14 @@ export function rankHits(hits = [], { title = '', artist = '' } = {}) {
     if (!askedVersion && VERSION_RE.test(`${hit.title} ${hit.album || ''}`)) value -= 3;
     return value;
   };
+  // 给了歌名就只认这首（含全称 / 简称互相包含）：同一位歌手的别的歌、合唱里挂了名的歌都不算这首
+  const titleOk = (hit) => {
+    if (!wantTitle) return true;
+    const name = baseTitle(hit.title);
+    return Boolean(name) && (name === wantTitle || name.includes(wantTitle) || wantTitle.includes(name));
+  };
   return hits
-    .filter((hit) => !wantArtist || artistMatches(hit.artist, wantArtist))
+    .filter((hit) => (!wantArtist || artistMatches(hit.artist, wantArtist)) && titleOk(hit))
     .map((hit, index) => ({ hit, index, value: score(hit) }))
     .sort((a, b) => b.value - a.value || a.index - b.index)
     .map((item) => item.hit);

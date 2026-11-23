@@ -200,3 +200,17 @@ test('口播频率：领取时问一次 speaks；不开口就停掉语音、交�
   const spoken=createEpisodeBuffer({capacity:1,build:async()=>ep('s'),speaks:()=>true});t.after(()=>spoken.dispose());spoken.ensure();await settle();
   assert.equal((await spoken.claim('s')).say,'歇一会儿');
 });
+
+test('安静档：备好时先不合成；领取时定了不说就一直不合成，定了要说才合成',async(t)=>{
+  let count=0;const texts=[];let speak=false;
+  const service=createEpisodeBuffer({capacity:1,build:async()=>ep(String(++count)),deferVoice:()=>true,speaks:()=>speak,synthesize:async(text)=>{texts.push(text);return {url:`/tts/${texts.length}.mp3`};}});
+  t.after(()=>service.dispose());service.ensure();await settle();
+  service.retryVoices();await settle();
+  assert.equal(texts.length,0); // 还没领取：不合成，retryVoices 也不合成
+  const muted=await service.claim('a');await settle();
+  assert.equal(muted.voice.status,'skipped');assert.equal(texts.length,0);
+  await settle(); speak=true;
+  const said=await service.claim('b');await settle();
+  assert.equal(texts.length,1);
+  assert.equal(service.getVoice(said.id).status,'ready');
+});

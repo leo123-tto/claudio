@@ -197,5 +197,7 @@ export function normalizeResult(obj = {}) {
     reason: clean(obj.reason),
     memory: legacyMemory || null,
     memoryCandidates,
+    // 口播引用了「可提往事」里的哪一条；只收 id，是不是真允许由 notebook.validateMemoryRef 再判。
+    memoryRef: /^n_[0-9a-z]{4,16}$/i.test(String(obj.memoryRef || '').trim()) ? String(obj.memoryRef).trim() : null,
   };
 }

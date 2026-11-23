@@ -29,6 +29,8 @@ import { currentScene, sceneText } from './scene.js';
 import { DRIVE_PROMPT } from './drive.js';
 import { readToneExtension, toneFor, toneKey, tonePrompt } from './tone.js';
 import { loadPersona, personaMode, personaNow } from './persona.js';
+import { backgroundText, mentionableText, notebookIsSource, personalNotebook, pickMentionable } from './notebook.js';
+import { currentRelation, relationText } from './familiarity.js';
 
 function readSafe(file) {
   try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; }
@@ -155,11 +157,11 @@ function profileText(profile) {
     .map((item) => `${item.artist}(${item.score})`).join('、');
   const avoidedArtists = profile.artists.filter((item) => item.score < 0).slice(-8)
     .map((item) => `${item.artist}(${item.score})`).join('、');
-  const stable = profile.memories.stable.slice(-12).map((item) => `- ${item.key}：${item.value}`).join('\n');
+  // 只输出口味统计，不再输出「已确认的偏好」那种记忆文字：
+  // 记忆的唯一来源是笔记本，画像里再塞一遍，用户在笔记本里删掉的那条就会从这里漏回提示词。
   return [
     likedArtists ? `正向歌手信号：${likedArtists}` : '',
     avoidedArtists ? `负向歌手信号：${avoidedArtists}` : '',
-    stable ? `已被至少两条证据确认的偏好：\n${stable}` : '',
   ].filter(Boolean).join('\n') || '（行为画像刚开始积累，先参考口味档案）';
 }
 
@@ -199,8 +201,23 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
   ].filter(Boolean).join('\n');
 
   const taste = readSafe(path.join(config.paths.user, 'taste.md'));
-  const tasteDigest = readSafe(path.join(config.paths.cache, 'taste-digest.md'));
-  const oldMemory = readMemory(24);
+  // 品味摘要只写口味。老版本写的「已经确认的偏好：…」是记忆原文，即便文件还没重建也不许进提示词
+  // （否则笔记本里删掉的那条会从这个缓存漏回来）。
+  const tasteDigest = readSafe(path.join(config.paths.cache, 'taste-digest.md'))
+    .split('\n')
+    .filter((line) => !line.includes('已经确认的偏好'))
+    .join('\n')
+    .trim();
+  // 记忆源：迁移过的笔记本是唯一来源，memory.md 只当回滚备份、不再注入（删掉的条目不能从旧文件里漏回来）。
+  const book = personalNotebook();
+  const bookNotes = book.list();
+  const useNotebook = notebookIsSource(book);
+  const oldMemory = useNotebook ? '' : readMemory(24);
+  const mentionable = pickMentionable(bookNotes, { recentSongs, limit: 5, now });
+  // 迁移后笔记本接管记忆：稳定的背景（含标了别主动提的）从这里来，memory.md 不再注入。
+  // quiet（分手、丧事、生病、职场冲突…）默认不进提示词，只有这轮他自己先说到相关的词才带上。
+  const background = useNotebook ? backgroundText(bookNotes, { limit: 12, userInput }) : '';
+  const relation = currentRelation({ notes: bookNotes.filter((note) => note.status === 'active').length });
   const routines = readUserDoc('routines.md');
   const moodRules = readUserDoc('mood-rules.md');
   const playlists = readPlaylists();
@@ -214,8 +231,8 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
     rng: seededRng(`pool|${hourKey}|${lane.lane}`),
   }));
 
-  const outputContract = `JSON 字段顺序必须是 say、intent、action、actionValue、play、reason、memoryCandidates：
-{"say":"中文口播","intent":"chat","action":"none","actionValue":0,"play":[],"reason":"意图与选择依据","memoryCandidates":[]}
+  const outputContract = `JSON 字段顺序必须是 say、intent、action、actionValue、play、reason、memoryCandidates、memoryRef：
+{"say":"中文口播","intent":"chat","action":"none","actionValue":0,"play":[],"reason":"意图与选择依据","memoryCandidates":[],"memoryRef":null}
 - say：必须第一个生成。聊天和推荐用中文口语 40 到 80 字（不算演出标记），少于 40 字就太干了；本次任务若要求简短口播则按任务长度。控制确认就一句，20 字内。
   除了把歌带出来，再给一两句有内容的：为什么此刻放它（时段、工作日还是周末、听众的口味或刚说的话），或一点你确实知道的歌曲 / 歌手背景，偶尔轻轻聊一句。说法每次都换，不用固定句式和开场套话，不清单式念歌名。
   不引用歌词。背景没把握就不说，不编年份、奖项、轶事。数字写阿拉伯数字，歌名用《》，句末用全角句号、问号或感叹号，每句不超过 40 字。
@@ -225,7 +242,8 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
 - play：只有 recommend 才能给歌曲，默认给 3 个候选；听众明确提出正向曲风、乐器或情绪要求时给 5 个候选，所有候选都须满足要求，宁可少给。仅排除某类音乐不启用 5 个候选。chat 和 control 必须给 []，绝不能因为对话里提到“歌”就自动推荐。按 play 顺序只播放前两首，其余仅是不可播时的备选；say 只可按顺序提到前两首，不能提备选。
 - play 每一项固定写成 {"title":"歌名","artist":"歌手","discoveryType":"adjacent","lane":"fresh","bridgeFrom":"从哪条偏好接过来","score":80}。title、artist 必填，写网易云上的原名，不加书名号，不写 Live / 伴奏 / 翻唱版。网易云没有版权的歌手（如周杰伦）不要选，放不出来。
 - discoveryType 只能是 familiar / adjacent / explore；score 是 0–100 的综合适配分。发现位的歌可加 lane：popular / fresh / classic。
-- memoryCandidates：只记录听众这次亲自表达的新证据，格式 {"key":"类别","value":"事实","evidence":"原话依据"}；没有就 []。`;
+- memoryCandidates：只记录听众这次亲自表达的新证据，格式 {"key":"类别","value":"事实","evidence":"原话依据"}；没有就 []。
+- memoryRef：这一期口播如果引用了「可提往事」里的某一条，填它的 id（形如 n_ab12cd34）；没引用就 null。最多一条，而且那条挂的歌必须出现在 play 的前两首里，否则不要引用。`;
 
   const styleRules = `本次有明确的正向曲风、乐器或情绪要求：${[userInput, mood].filter(Boolean).join(' ')}。
 若 intent=recommend，给 5 个候选，全部满足本次要求；前两首计划播放，后三首只作不可播时的备选，say 只提到前两首。宁可少给，不用不符的歌补位。
@@ -271,6 +289,10 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
     moodRules ? '## 情绪规则\n' + moodRules : '',
     tasteDigest ? '## 持续整理的品味（他亲口说过好听或点过爱心后自动整理；手写口味档案仍以 taste.md 为准）\n' + tasteDigest : '',
     oldMemory ? '## 人工可编辑的长期记忆（保留旧系统，只作稳定背景）\n' + oldMemory : '',
+    background ? '## 她记得的事（稳定背景，用来更懂人；不要拿来当口播开场梗）\n' + background : '',
+    mentionable.length ? '## 可提往事（这次她能不能提起旧事，只看这里）\n' + mentionableText(mentionable)
+      + '\n规则：一整期最多提一件，而且必须和这次要放的歌是同一件事（那条挂的歌就在你要放的歌里）；只能从上面挑，挑不到就不提，绝不编。不提就 memoryRef=null。' : '',
+    '## 你们的关系（决定怎么说话，不要说出来）\n' + relationText(relation),
     banned.length ? '## 禁播（自动推荐不要再选，听众可以要求恢复）\n' + formatSongs(banned) : '',
     favoriteSample.length ? '## 收藏曲口味样本（只作锚点，自动推荐严禁照搬原曲）\n' + formatSongs(favoriteSample) : '',
     '## 结构化行为画像（分数越高越偏爱，负数表示避开）\n' + profileText(profile),
@@ -316,6 +338,8 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
       mode: brief.mode,
       discoveryLane: lane.lane,
       poolSongs: pool,
+      mentionable,
+      relation: { stage: relation.stage, label: relation.label },
     },
   };
 }

@@ -1,0 +1,101 @@
+/* 「Vera 的笔记本」：和电台同一套配色与字体，四栏卡片。
+   手机一列，≥900px 四列。没有进度条、没有数字、没有等级 —— 故意的。 */
+.nb-body {
+  min-height: 100dvh;
+  margin: 0;
+  padding: 0 16px 64px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+.nb-head {
+  max-width: 1180px; margin: 0 auto; padding: 28px 0 8px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.nb-back {
+  display: inline-flex; align-items: center; gap: 6px; width: fit-content;
+  color: var(--fg-2); text-decoration: none; font-size: 13px; letter-spacing: .06em;
+  border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px;
+}
+.nb-back:hover { color: var(--fg); border-color: var(--line-strong); }
+.nb-title h1 {
+  margin: 0; font-family: var(--font-dot); font-size: clamp(22px, 4vw, 30px);
+  font-weight: 500; letter-spacing: .04em;
+}
+.nb-title p { margin: 8px 0 0; color: var(--fg-2); font-size: 14px; line-height: 1.7; max-width: 62ch; }
+.nb-inline { margin: 0; min-height: 1em; color: var(--fg-3); font-size: 13px; }
+
+.nb-main { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.nb-add {
+  border: 1px solid var(--line); border-radius: 16px; padding: 14px;
+  background: var(--fill); display: flex; flex-direction: column; gap: 10px;
+}
+.nb-add-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.nb-add-row > input { flex: 1 1 220px; }
+.nb-add select, .nb-add input {
+  min-width: 0; padding: 10px 12px; border-radius: 10px; font-size: 14px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  font-family: inherit;
+}
+.nb-add select:focus, .nb-add input:focus { outline: none; border-color: var(--line-strong); }
+.nb-btn {
+  border: 1px solid var(--line-strong); background: transparent; color: var(--fg);
+  border-radius: 999px; padding: 9px 18px; font-size: 14px; font-family: inherit; cursor: pointer;
+}
+.nb-btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.nb-btn:disabled { opacity: .5; cursor: default; }
+.nb-note { margin: 0; color: var(--fg-3); font-size: 12.5px; line-height: 1.7; }
+
+.nb-cols { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+.nb-col { display: flex; flex-direction: column; gap: 10px; }
+.nb-col-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+.nb-col-head h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .12em; }
+.nb-col-head span { color: var(--fg-3); font-size: 12px; }
+
+.nb-card {
+  border: 1px solid var(--line); border-radius: 14px; padding: 12px 13px;
+  background: var(--fill); display: flex; flex-direction: column; gap: 8px;
+}
+.nb-card.muted { opacity: .55; border-style: dashed; }
+.nb-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.nb-date { color: var(--fg-3); font-family: var(--font-mono); font-size: 11.5px; }
+.nb-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.nb-tag { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--fg-2); }
+.nb-tag.quiet { border-color: rgba(215, 25, 33, .5); color: #ff8a8f; }
+.nb-tag.muted { border-color: var(--line-strong); color: var(--fg-3); }
+.nb-text { margin: 0; font-size: 14.5px; line-height: 1.7; word-break: break-word; }
+.nb-quote {
+  margin: 0; padding: 8px 10px; border-left: 2px solid var(--line-strong);
+  color: var(--fg-2); font-size: 13px; line-height: 1.7; white-space: pre-wrap;
+}
+.nb-songs { display: flex; flex-wrap: wrap; gap: 6px; }
+.nb-songs:empty { display: none; }
+.nb-song { font-size: 11.5px; color: var(--fg-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+.nb-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.nb-actions button {
+  border: 0; background: none; color: var(--fg-3); font: inherit; font-size: 12.5px;
+  padding: 6px 8px; border-radius: 8px; cursor: pointer;
+}
+.nb-actions button:hover { color: var(--fg); background: var(--fill-2); }
+.nb-actions button.danger:hover { color: #ff8a8f; }
+.nb-empty { color: var(--fg-2); font-size: 14px; line-height: 1.8; }
+
+.nb-edit { display: flex; flex-direction: column; gap: 8px; }
+.nb-edit input, .nb-edit textarea, .nb-edit select {
+  width: 100%; box-sizing: border-box; padding: 9px 11px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; font-size: 14px;
+}
+.nb-edit textarea { min-height: 70px; resize: vertical; line-height: 1.6; }
+.nb-edit-row { display: flex; gap: 8px; }
+.nb-edit-row > * { flex: 1; }
+.nb-edit-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg-2); }
+.nb-edit-check input { width: auto; }
+
+@media (min-width: 900px) {
+  .nb-cols { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .nb-body { padding: 0 28px 80px; }
+}

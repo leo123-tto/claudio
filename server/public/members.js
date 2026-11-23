@@ -34,7 +34,13 @@ export function decrypt(key, packed) {
 }
 
 function emptyMemory() {
-  return { prefs: [], recent: [], history: [], hearts: [], turns: [], taste: null, account: null, lastActive: 0 };
+  return {
+    prefs: [], recent: [], history: [], hearts: [], turns: [], taste: null, account: null, lastActive: 0,
+    // 笔记本：结构化长期记忆（人 / 习惯 / 歌 / 事），条目不跨人；清空 / 删除整块带走
+    notes: [],
+    // 隐性关系进度只记到达过的最高档（只升不降），界面不显示
+    relation: null,
+  };
 }
 
 export function createMemberStore({ root, vaultKey, now = () => Date.now() }) {
@@ -46,6 +52,7 @@ export function createMemberStore({ root, vaultKey, now = () => Date.now() }) {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, text, { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600); // 迁移脚本 / 手工写过的文件可能是 0644，这里统一收紧
     fs.renameSync(tmp, file);
   };
 
@@ -64,14 +71,24 @@ export function createMemberStore({ root, vaultKey, now = () => Date.now() }) {
       recent: (mem.recent || []).slice(-40),
       history: (mem.history || []).slice(0, HISTORY_MAX),
       turns: (mem.turns || []).slice(-6),
+      notes: (mem.notes || []).slice(-400),
       lastActive: now(),
     };
     write(path.join(dir(id), 'memory.json'), JSON.stringify(clean));
     return clean;
   }
 
+  // 清空记忆：主文件和迁移时留下的备份一起删。只删主文件的话，删掉的条目还在 *.bak 里躺着。
   function clearMemory(id) {
-    fs.rmSync(path.join(dir(id), 'memory.json'), { force: true });
+    const folder = dir(id);
+    fs.rmSync(path.join(folder, 'memory.json'), { force: true });
+    let names = [];
+    try { names = fs.readdirSync(folder); } catch { names = []; }
+    for (const name of names) {
+      if (/^memory\.json\..+\.bak$/.test(name) || name === 'memory.json.bak') {
+        fs.rmSync(path.join(folder, name), { force: true });
+      }
+    }
   }
 
   function setCookie(id, cookie) {

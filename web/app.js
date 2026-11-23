@@ -1090,6 +1090,11 @@ function showSong(item, i) {
   highlightLine(i);
   bindLyrics(el.stream.querySelector(`.line[data-idx="${i}"] .lyric`), item);
   el.nowPlaying.textContent = `Now playing: ${item.meta.title} — ${item.meta.artist}`;
+  // 好友互荐（friends.js）：正在放的这首，朋友推荐来的带上是谁
+  try {
+    window.dispatchEvent(new CustomEvent('claudio:now', { detail: { id: item.meta.id, title: item.meta.title, artist: item.meta.artist, cover: item.meta.cover || '',
+      ...(item.meta.friendRec ? { rec: { id: item.meta.friendRec, from: item.meta.friendFrom } } : {}) } }));
+  } catch { /* 好友界面出错也不影响放歌 */ }
 }
 
 function onItemStart(item, i) {
@@ -1658,6 +1663,28 @@ function showSayBubble(text, audio) {
 // ── 字幕流 ──
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// 「她想起了你说的那件事」：点开是她提起的那条记忆 + 老板的原话。
+function memoryChip(ref) {
+  const wrap = document.createElement('div');
+  wrap.className = 'say-memory';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'say-memory-btn';
+  btn.textContent = '她想起了你说的那件事';
+  const detail = document.createElement('div');
+  detail.className = 'say-memory-detail hidden';
+  const date = new Date(ref.at);
+  detail.innerHTML = `<p>${escapeHtml(ref.text)}</p>`
+    + (ref.quote ? `<blockquote>${escapeHtml(ref.quote)}</blockquote>` : '')
+    + `<time>${Number.isNaN(date.getTime()) ? '' : `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getDate()).padStart(2, '0')}`}</time>`;
+  btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    detail.classList.toggle('hidden');
+  });
+  wrap.append(btn, detail);
+  return wrap;
+}
+
 function renderStream(ep) {
   clearStageView();
   el.stream.innerHTML = '';
@@ -1668,6 +1695,11 @@ function renderStream(ep) {
     div.style.animationDelay = `${Math.min(i, 6) * 60}ms`; // 错峰进场
     if (item.type === 'tts') {
       div.innerHTML = `<span class="who">Vera</span><div class="bubble">${escapeHtml(item.text)}</div>`;
+      // 这一期她提起了一件旧事：给个小角标，点开能看到原话和日期。
+      if (ep.memoryRef && !ep.__memoryChip) {
+        ep.__memoryChip = true;
+        div.appendChild(memoryChip(ep.memoryRef));
+      }
     } else {
       div.dataset.song = '1';
       div.innerHTML = `<span class="who">♪ ${escapeHtml(item.meta.title)} — ${escapeHtml(item.meta.artist)}</span><div class="lyric"></div>`;
@@ -2162,7 +2194,8 @@ function favoriteCurrent({ toggle = false } = {}) {
   localStorage.setItem('claudio-favs', JSON.stringify([...favs]));
   fetch('/api/fav', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: item.meta.title, artist: item.meta.artist, ...(!favs.has(k) ? { remove: true } : {}) }),
+    body: JSON.stringify({ title: item.meta.title, artist: item.meta.artist, discoveryType: item.meta.discoveryType,
+      ...(!favs.has(k) ? { remove: true } : item.meta.friendRec ? { friendRec: item.meta.friendRec } : {}) }),
   }).catch(() => {});
   return true;
 }
@@ -2848,9 +2881,39 @@ function closeMemory() { el.memoryPanel.classList.add('hidden'); idleHider.refre
 document.querySelector('.avatar')?.addEventListener('click', async () => {
   if (!el.memoryPanel.classList.contains('hidden')) { closeMemory(); return; }
   try {
-    const j = await (await fetch('/api/memory')).json();
-    const mem = (j.ok && (j.memory || '')).trim();
-    el.memoryText.textContent = mem || '还没记下什么，多陪我聊聊就慢慢懂你了。';
+    const book = await (await fetch('/api/notebook')).json().catch(() => null);
+    const notes = (book?.notes || []);
+    el.memoryText.innerHTML = '';
+    if (notes.length) {
+      const labels = { person: '人', habit: '习惯', song: '歌', event: '事' };
+      for (const key of ['person', 'habit', 'song', 'event']) {
+        const list = notes.filter((note) => note.kind === key && note.status !== 'muted');
+        if (!list.length) continue;
+        const head = document.createElement('div');
+        head.className = 'memory-kind';
+        head.textContent = labels[key];
+        el.memoryText.appendChild(head);
+        const ul = document.createElement('ul');
+        for (const note of list.slice(-8)) {
+          const li = document.createElement('li');
+          li.textContent = note.text;
+          ul.appendChild(li);
+        }
+        el.memoryText.appendChild(ul);
+      }
+    } else if (!book?.migrated) {
+      // 还没迁到笔记本：先照旧显示 memory.md
+      const j = await (await fetch('/api/memory')).json();
+      const mem = (j.ok && (j.memory || '')).trim();
+      el.memoryText.textContent = mem || '还没记下什么，多陪我聊聊就慢慢懂你了。';
+    } else {
+      el.memoryText.textContent = '还没记下什么，多陪我聊聊就慢慢懂你了。';
+    }
+    const link = document.createElement('a');
+    link.className = 'memory-open';
+    link.href = '/notebook';
+    link.textContent = '打开笔记本：改、删、别再提 →';
+    el.memoryText.appendChild(link);
     el.memoryPanel.classList.remove('hidden');
     idleHider.refresh();
   } catch {}

@@ -2,6 +2,7 @@
 // 独立端口、独立数据目录、没有老板的口味 / 记忆 / 网易云 cookie / 5090 钥匙。
 //
 // 必填环境变量：PUBLIC_HUB_BASE、PUBLIC_HUB_KEY（claudio-invite scope）、PUBLIC_VAULT_KEY、CLAUDIO_DATA_DIR
+// 好友互荐：PUBLIC_FRIENDS（0 = 关）PUBLIC_OWNER_NAME（老板在好友圈里的默认名字，默认「站长」）FRIENDS_INTERNAL（老板个人版用的内部口，如 127.0.0.1:8092；不设不开）
 // 可选：PORT(8091) HOST(127.0.0.1) NCM_BASE NCM_SHARED_URL（老板实例的搜索名额服务，盒子上是 http://127.0.0.1:8099）PUBLIC_LLM_BASE PUBLIC_LLM_MODEL PUBLIC_ENGINE_METRICS
 //      PUBLIC_BORROW_OWNER（0 = 未绑定时不用运营者配置的默认音源）PUBLIC_MAX_LISTENERS PUBLIC_FREE_CHART（没绑定的人放哪个榜单里的免费歌，默认热歌榜）PUBLIC_COOKIE_SECURE PUBLIC_APPLY_ORIGINS PUBLIC_TURNSTILE_SECRET(_FILE) PUBLIC_TURNSTILE_SITEKEY PUBLIC_TTS（0 = 不念口播）
 import fs from 'node:fs';
@@ -12,6 +13,8 @@ import { createPublicApp, syncWithHub } from './app.js';
 import { createBrain } from './brain.js';
 import { createHubClient } from './hub-client.js';
 import { createMemberStore, parseVaultKey } from './members.js';
+import { createFriendStore, loadWords } from './friends.js';
+import { startOwnerServer } from './friends-routes.js';
 import { createNcmClient } from './ncm-public.js';
 import { createOwnerChannel } from '../ncm-shared.js';
 
@@ -44,10 +47,18 @@ const log = (event, id = '', extra = '') => {
 };
 
 const hub = createHubClient({ base: env.PUBLIC_HUB_BASE, key: env.PUBLIC_HUB_KEY });
-const members = createMemberStore({
-  root: path.join(path.resolve(env.CLAUDIO_DATA_DIR), 'members'),
-  vaultKey: parseVaultKey(env.PUBLIC_VAULT_KEY),
-});
+const dataDir = path.resolve(env.CLAUDIO_DATA_DIR);
+const vaultKey = parseVaultKey(env.PUBLIC_VAULT_KEY);
+const members = createMemberStore({ root: path.join(dataDir, 'members'), vaultKey });
+// 好友互荐：一份加密文件；附言 / 昵称的敏感词表 friend-words.txt 放数据目录（一行一个，不进仓库）。PUBLIC_FRIENDS=0 关掉
+const ownerName = env.PUBLIC_OWNER_NAME || '站长';
+const friends = env.PUBLIC_FRIENDS === '0' ? null : createFriendStore({ file: path.join(dataDir, 'friends.enc'), vaultKey, ownerName });
+const wordsFile = path.join(dataDir, 'friend-words.txt');
+let words = { at: 0, list: [] };
+const friendWords = () => {
+  if (Date.now() - words.at > 60_000) words = { at: Date.now(), list: loadWords(wordsFile) };
+  return words.list;
+};
 // 未绑定网易云时用运营者配置的默认音源（经主实例取链接，主实例的 cookie 不进这个进程）；PUBLIC_BORROW_OWNER=0 关掉
 const owner = env.NCM_SHARED_URL && env.PUBLIC_BORROW_OWNER !== '0' ? createOwnerChannel(env.NCM_SHARED_URL) : null;
 const ncm = createNcmClient({ base: env.NCM_BASE || 'http://127.0.0.1:3011', sharedUrl: env.NCM_SHARED_URL || '', owner });
@@ -64,7 +75,7 @@ const turnstileSiteKey = env.PUBLIC_TURNSTILE_SITEKEY || '';
 const turnstileSecret = turnstileSiteKey ? (env.PUBLIC_TURNSTILE_SECRET || readSecretFile(env.PUBLIC_TURNSTILE_SECRET_FILE)) : '';
 if (!turnstileSecret || !turnstileSiteKey) log('turnstile-off', '', turnstileSiteKey ? 'no-secret' : 'no-sitekey');
 
-const { app } = createPublicApp({
+const { app, recommendFriend } = createPublicApp({
   hub,
   ncm,
   brain,
@@ -78,16 +89,21 @@ const { app } = createPublicApp({
   freeChartId: env.PUBLIC_FREE_CHART || '3778678',
   // 口播找老板实例的 8099 名额服务要（PUBLIC_TTS=0 关掉）
   ttsUrl: env.PUBLIC_TTS === '0' ? '' : (env.NCM_SHARED_URL || ''),
+  friends,
+  friendWords,
+  ownerName,
   log,
 });
 
 const port = Number(env.PORT || 8091);
 const host = env.HOST || '127.0.0.1';
 http.createServer(app).listen(port, host, () => log('listening', `${host}:${port}`));
+// 老板个人版进好友圈的内部口：只听本机（盒子上 127.0.0.1:8092），不挂在对外的 8091 上
+if (friends && env.FRIENDS_INTERNAL) startOwnerServer(env.FRIENDS_INTERNAL, { friends, recommend: recommendFriend, words: friendWords }, log);
 
 async function sync() {
   try {
-    await syncWithHub({ hub, members, log });
+    await syncWithHub({ hub, members, friends, log });
   } catch (error) {
     log('sync-failed', '', error.reason || error.name);
   }

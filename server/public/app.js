@@ -3,16 +3,19 @@
 import express from 'express';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { BrainBusyError, publicTone } from './brain.js';
+import { BrainBusyError, publicTone, relationStage } from './brain.js';
 import { NcmBusyError, toHttps } from './ncm-public.js';
 import { HubError } from './hub-client.js';
 import { createMediaProxy } from './media.js';
 import { createMixer, shuffle, songKey } from './mix.js';
-import { createVoice, introLine } from './voice.js';
+import { createVoice, introLine, recIntro, withNote } from './voice.js';
+import { createRecommender, matchFriend, mountFriendRoutes, parseRecText } from './friends-routes.js';
+import { stripTags } from '../tts/tags.js';
 import { oneSentence } from '../drive.js';
 import { readToneExtension } from '../tone.js';
 import { TALK_LEVELS, applyTalk, createTalkTracker, effectiveTalk, hourKeyOf, speakReasons, talkAck, talkFromText } from '../talk.js';
 import { appVersion } from '../version.js';
+import { KIND_LABEL, NOTE_KINDS, buildNote, mergeInferredNotes, patchNote, pickMentionable, validateMemoryRef } from '../notebook.js';
 
 const COOKIE = 'dj_dev';
 const BEIJING = 8 * 3600_000;
@@ -137,6 +140,9 @@ export function createPublicApp({
   ttsUrl = '',
   toneExtension = readToneExtension, // 本容器数据目录里的本地语气扩展（没有文件就没有这个开关）；测试可以换掉
   voiceOptions = {},
+  friends = null, // 好友互荐的存储（friends.js）；不给就不开这个功能
+  friendWords = () => [], // 附言 / 昵称的本地敏感词表（数据目录里，不进仓库）
+  ownerName = '站长',
   fetchFn = fetch,
   log = () => {},
   now = () => Date.now(),
@@ -151,6 +157,7 @@ export function createPublicApp({
   const media = createMediaProxy({ ncm, members, qualityFor, fetchFn, now, log });
   const mixer = createMixer({ ncm, brain, members, qualityFor, log, now });
   const voice = createVoice({ ttsUrl, fetchFn, now, log, ...voiceOptions });
+  const recommendFriend = friends ? createRecommender({ friends, words: friendWords, brain, log }) : null;
   const talkers = new Map(); // memberId -> 上一次开口的记录（只在内存里，每位朋友各一份）
   const talkerOf = (id) => {
     if (!talkers.has(id)) {
@@ -276,15 +283,71 @@ export function createPublicApp({
       vip: Boolean(mem.account?.vip),
       quality: mem.quality === 'smooth' ? 'smooth' : 'lossless',
       prefs: mem.prefs,
+      notesCount: (mem.notes || []).filter((note) => note?.status !== 'muted').length,
       adult: Boolean(extension) && mem.adult === true,
       adultLabel: extension?.label || null,
       talk: effectiveTalk(mem.talk, now()),
     };
   };
 
+  // ── 笔记本：每人一份结构化长期记忆（人 / 习惯 / 歌 / 事），存在各自 memory.json 的 notes 里 ──
+  // 每人都只看自己的；删 = 从自己的 notes 里真删。
+  // 只升不降：算出来的档和记住的比，取高的那个（算法在 brain.js 的 relationStage，两处共用）。
+  // 档位名不出这个函数：接口和界面都不该看见「熟客 / 老友」这种标签。
+  const relationFor = (mem) => ({ stage: relationStage(mem) });
+
+  app.get('/api/notebook', auth, (req, res) => {
+    const mem = members.memory(req.member.id);
+    const notes = Array.isArray(mem.notes) ? mem.notes : [];
+    // 关系一个字都不下发：界面不该看见档位名，更不该看见数字
+    res.json({
+      ok: true,
+      migrated: true,
+      kinds: NOTE_KINDS.map((key) => ({ key, label: KIND_LABEL[key] })),
+      notes,
+    });
+  });
+
+  app.post('/api/notebook', auth, (req, res) => {
+    const note = buildNote({
+      text: req.body?.text,
+      quote: req.body?.quote,
+      kind: req.body?.kind,
+      songs: req.body?.songs,
+      source: 'manual',
+    });
+    if (!note) return res.status(400).json({ error: 'bad_note', message: '内容太短' });
+    const mem = members.memory(req.member.id);
+    members.saveMemory(req.member.id, { ...mem, notes: [...(mem.notes || []), note] });
+    res.json({ ok: true, note });
+  });
+
+  app.patch('/api/notebook/:id', auth, (req, res) => {
+    const mem = members.memory(req.member.id);
+    const notes = Array.isArray(mem.notes) ? mem.notes : [];
+    const index = notes.findIndex((note) => note?.id === String(req.params.id));
+    if (index < 0) return res.status(404).json({ error: 'not_found', message: '没找到这条' });
+    const updated = patchNote(notes[index], req.body || {});
+    if (!updated) return res.status(400).json({ error: 'bad_note', message: '内容太短' });
+    const next = [...notes];
+    next[index] = updated;
+    members.saveMemory(req.member.id, { ...mem, notes: next });
+    res.json({ ok: true, note: updated });
+  });
+
+  app.delete('/api/notebook/:id', auth, (req, res) => {
+    const mem = members.memory(req.member.id);
+    const notes = Array.isArray(mem.notes) ? mem.notes : [];
+    const next = notes.filter((note) => note?.id !== String(req.params.id));
+    if (next.length === notes.length) return res.status(404).json({ error: 'not_found', message: '没找到这条' });
+    members.saveMemory(req.member.id, { ...mem, notes: next });
+    res.json({ ok: true });
+  });
+
   // 菜单里看设备数要准：先丢掉这台的核验缓存再核一次
   // 网页（web/，和个人版同一份）先问这个：公用版只露出配额、最近听过、账号这几样，播放引擎用 public.js
-  app.get('/api/mode', (req, res) => res.json({ mode: 'public', features: { quota: true, history: true, account: true, drive: true }, version: appVersion() }));
+  app.get('/api/mode', (req, res) => res.json({ mode: 'public', features: { quota: true, history: true, account: true, drive: true, notebook: true, ...(friends ? { friends: true } : {}) }, version: appVersion() }));
+  if (friends) mountFriendRoutes(app, { auth, friends, recommend: recommendFriend, members, failLimiter, clientIp, words: friendWords, ownerName });
 
   app.get('/api/me', (req, res, next) => {
     const token = parseCookies(req.headers.cookie)[COOKIE];
@@ -402,6 +465,29 @@ export function createPublicApp({
     return { songs, notice };
   }
 
+  // 好友推荐的歌：这批第一首插一首（隔 10 分钟以上，见 friends.next）。按这位朋友自己的登录态 / 档位取；
+  // 放不了就标出来不再给；网易云忙就当这次没给，过半小时再给。
+  async function friendSong(m, memory, cookie, smooth) {
+    if (!friends) return null;
+    let rec;
+    try { rec = friends.next(m.id); } catch { return null; }
+    if (!rec) return null;
+    const level = qualityFor(memory, cookie, smooth);
+    try {
+      const song = await ncm.playById({ id: rec.song.id, title: rec.song.title, artist: rec.song.artist, duration: rec.song.duration, cover: rec.song.cover },
+        { cookie, memberId: m.id, level });
+      if (!song?.playable) {
+        friends.unplayable(m.id, rec.id);
+        return null;
+      }
+      media.remember(m.id, level, song);
+      return { ...songView({ cover: rec.song.cover, ...song }), rec: { id: rec.id, from: rec.from.name, note: rec.note } };
+    } catch (error) {
+      log('friend-rec-skip', m.id, error.code || error.name);
+      return null;
+    }
+  }
+
   const beijingHour = () => new Date(now() + 8 * 3600_000).getUTCHours();
 
   // 自动接着放的报幕：先给每首一句模板（马上能念、也是大脑写不出来时的退路），再让大脑在后台换成像样的。
@@ -415,22 +501,28 @@ export function createPublicApp({
     const talker = talkerOf(m.id);
     const stamp = { at, tier: publicTone({ at }).key, hourKey: hourKeyOf(at, BEIJING) };
     songs.forEach((song, i) => {
-      const fallback = introLine(song);
+      // 好友推荐的歌：模板报幕带上是谁推荐的和附言（附言原样接在后面念，不进大脑）；口播频率再低也报（talk.js 的 recommended）
+      const rec = song.rec ? recIntro({ from: song.rec.from, song, note: song.rec.note }) : null;
+      const fallback = rec ? rec.speak : introLine(song);
       if (drive && i > 0) return;
-      const why = speakReasons(level, talker.context(stamp));
+      const why = speakReasons(level, { ...talker.context(stamp), recommended: Boolean(rec) });
       if (!why.length) { talker.markPlayed(at); return; }
       talker.markSpoken(stamp);
-      song.say = fallback;
+      song.say = rec ? rec.say : fallback;
       if (drive || (i === 0 && !ahead)) {
-        song.voice = voice.request(m.id, fallback, { tone });
+        song.voice = voice.request(m.id, drive ? oneSentence(fallback) : fallback, { tone });
         return;
       }
       const produce = async () => {
         if (typeof brain.askIdle !== 'function') return '';
         try {
           const memory = members.memory(m.id);
-          const out = await brain.askIdle({ memory, bound: true, hour: beijingHour(), tone, intro: song, name: m.name, extension: adultExtension(memory, drive) }, { waitMs: 30_000 });
-          return out?.sayTagged || '';
+          const intro = rec ? { title: song.title, artist: song.artist, from: song.rec.from } : song;
+          const out = await brain.askIdle({ memory, bound: true, hour: beijingHour(), tone, intro, name: m.name, extension: adultExtension(memory, drive) }, { waitMs: 30_000 });
+          const tagged = out?.sayTagged || '';
+          // 大脑写的报幕必须先说是谁推荐的，不然用模板；附言由这里接上
+          if (rec) return stripTags(tagged).trim().startsWith(`${song.rec.from}给你推荐了`) ? withNote(tagged, song.rec.from, song.rec.note) : '';
+          return tagged;
         } catch (error) {
           log('intro-skip', m.id, error.code || error.name);
           return '';
@@ -438,6 +530,24 @@ export function createPublicApp({
       };
       song.voice = voice.requestIntro(m.id, { produce, fallback, tone });
     });
+  }
+
+  // 没说「这首」、名字也对不上好友的（「推荐给我几首……」），返回 null 照常交给大脑
+  function recommendByText(m, { name, note, explicit }) {
+    const reply = (say) => ({ say, songs: [], notice: '', intent: 'chat', remaining: null });
+    friends.seen(m.id, m.name);
+    const { hits } = matchFriend(friends.friends(m.id), name);
+    if (!explicit && !hits.length) return null;
+    const song = (members.memory(m.id).history || [])[0];
+    if (!song) return reply('先放一首，再说推荐给谁。');
+    if (!hits.length) return reply(`好友里没找到「${name}」。先在「好友」里加上 ta。`);
+    if (hits.length > 1) return reply(`好友里有好几个像「${name}」的：${hits.map((f) => f.name).join('、')}。说全名？`);
+    try {
+      const rec = recommendFriend(m.id, hits[0].id, song, note);
+      return { ...reply(`好，《${song.title}》推荐给${hits[0].name}了${rec.noteState === 'pending' ? '，附言检查过了才给 ta 看' : ''}。`), friendRec: rec };
+    } catch (error) {
+      return reply(error.message || '没推荐成功');
+    }
   }
 
   app.post('/api/chat', auth, async (req, res) => {
@@ -454,6 +564,10 @@ export function createPublicApp({
       members.saveMemory(m.id, { ...mem, talk: applyTalk(mem.talk, talkChange, { now: now(), tzOffsetMs: BEIJING }) });
       return res.json({ say: talkAck(talkChange), songs: [], notice: '', intent: 'chat', remaining: null, talk: talkChange.level });
     }
+    // 「把这首推荐给小王，说……」：不打大脑、不扣次数、不记进对话
+    const recAsk = auto || !friends ? null : parseRecText(text);
+    const recReply = recAsk ? recommendByText(m, recAsk) : null;
+    if (recReply) return res.json(recReply);
     // 盒子出口匿名搜索一律 405，会连累主实例：没有默认音源（没配 NCM_SHARED_URL）时，没绑定的不开放点歌，也不扣次数
     if (!auto && !cookie && !ncm.borrowsOwner) {
       return res.json({ say: '', songs: [], notice: '绑定网易云后才能点歌（右上角菜单里扫码）。不绑定也能按播放，听榜单里的免费歌。', intent: 'chat', remaining: null, needBind: true });
@@ -463,7 +577,12 @@ export function createPublicApp({
       const quota = await hub.consume(m.id, auto ? 'song' : 'chat');
       const memory = members.memory(m.id);
       if (auto) {
+        const fromFriend = await friendSong(m, memory, cookie, smooth);
         const picked = await autoSongs(m, memory, cookie, smooth);
+        if (fromFriend) {
+          picked.songs = [fromFriend, ...picked.songs.filter((s) => s.id !== fromFriend.id)];
+          picked.notice = '';
+        }
         // 选歌要好几秒，期间「开始放」可能记了最近听过：只合并这里改过的字段，别拿旧快照整份覆盖
         const { taste, deck, rec, simi, fresh, freshTried } = memory;
         members.saveMemory(m.id, { ...members.memory(m.id), taste, deck, rec, simi, fresh, freshTried });
@@ -471,11 +590,15 @@ export function createPublicApp({
         return res.json({ say: '', songs: withLiked(memory, picked.songs), notice: picked.notice, intent: 'recommend', remaining: quota.remaining, degraded: false });
       }
       const tone = publicTone({ at: now(), drive });
+      // 笔记本：只有挂着歌、没标「别再提」、不敏感的往事才进来；挑不到就一条也不给。
+      const notes = pickMentionable(memory.notes, { recentSongs: memory.recent, limit: 5 });
+      const relation = relationFor(memory);
       let reply;
       let degraded = false;
       try {
-        reply = await brain.ask({ text, auto, memory, bound: true, drive, hour: beijingHour(), tone, name: m.name, extension: adultExtension(memory, drive) });
-      } catch (error) {
+        reply = await brain.ask({ text, auto, memory, bound: true, drive, hour: beijingHour(), tone, name: m.name,
+          extension: adultExtension(memory, drive), notes, relation });
+    } catch (error) {
         if (error?.queueFull) throw error;
         degraded = true;
         log('brain-degraded', m.id, error.code || error.name);
@@ -489,13 +612,17 @@ export function createPublicApp({
       const say = drive ? oneSentence(fullSay) : fullSay;
       const turns = [...(memory.turns || []), { role: 'user', text }];
       if (say) turns.push({ role: 'dj', text: say });
-      const prefs = [...(memory.prefs || [])];
-      for (const p of reply.memoryCandidates) if (!prefs.includes(p)) prefs.push(p);
-      members.saveMemory(m.id, { ...members.memory(m.id), turns, prefs });
+      // 新学到的事直接写进笔记本（source: inferred）——迁移后 prefs 不再是记忆来源，
+      // 再往 prefs 里塞，笔记本里删掉的那条就会从 prefs 漏回提示词。
+      const learned = mergeInferredNotes(memory.notes, reply.memoryCandidates || []);
+      // 口播提了哪件旧事：必须是这次给过她的候选，而且那条挂的歌真的在放
+      const memoryRef = validateMemoryRef({ refId: reply.memoryRef, candidates: notes, playedSongs: picked.songs });
+      members.saveMemory(m.id, { ...members.memory(m.id), turns, notes: learned, relation: { stage: relation.stage } });
       // 念的是带演出标记的原稿；驾驶模式一句、不带标记
       const voiceId = say && !degraded ? voice.request(m.id, drive ? say : (reply.sayTagged || say), { tone }) : '';
       if (say) talkerOf(m.id).markSpoken({ at: now(), tier: publicTone({ at: now() }).key, hourKey: hourKeyOf(now(), BEIJING) });
-      res.json({ say, voice: voiceId, songs: withLiked(memory, picked.songs), notice: picked.notice, intent: reply.intent, remaining: quota.remaining, degraded });
+      res.json({ say, voice: voiceId, songs: withLiked(memory, picked.songs), notice: picked.notice, intent: reply.intent, remaining: quota.remaining, degraded,
+        ...(memoryRef ? { memoryRef } : {}) });
     } catch (error) { sendError(res, error); }
   });
 
@@ -509,6 +636,9 @@ export function createPublicApp({
       // 最近听过：同一首放到最前，最多 100 首（members.js 截）
       const history = id ? [{ id, title, artist, cover, at: now() }, ...(mem.history || []).filter((s) => s.id !== id)] : mem.history;
       members.saveMemory(req.member.id, { ...mem, recent: [...(mem.recent || []), { id, title, artist }], history });
+    }
+    if (friends && req.body?.rec) {
+      try { friends.played(req.member.id, String(req.body.rec)); } catch { /* 推荐已经删了 / 不是 ta 的 */ }
     }
     res.json({ ok: true });
   });
@@ -545,6 +675,8 @@ export function createPublicApp({
         taste = { ...taste, likeIds, likes };
       }
       members.saveMemory(mid, { ...mem, hearts: hearts.slice(0, 500), taste });
+      // 红心也算「好听」：是好友推荐来的就告诉推荐人
+      if (on && friends) { try { friends.likeSong(mid, id); } catch { /* 不是推荐来的 */ } }
       res.json({ ok: true, liked: on, synced });
     } catch (error) { sendError(res, error); }
   });
@@ -649,17 +781,23 @@ export function createPublicApp({
   app.use(express.static(webRoot, { index: 'index.html', maxAge: '5m' }));
   app.get('/join', (req, res) => res.sendFile(path.join(webRoot, 'index.html')));
   app.get('/apply', (req, res) => res.sendFile(path.join(webRoot, 'apply.html')));
+  app.get('/notebook', (req, res) => res.sendFile(path.join(webRoot, 'notebook.html')));
   app.use('/api', (req, res) => res.status(404).json({ error: 'not_found' }));
   app.use((req, res) => res.status(404).send('not found'));
 
-  return { app, listeners };
+  return { app, listeners, recommendFriend };
 }
 
 // 定时跟 hub 对一次：停用 / 到期 / 删除的人，本地数据整块删；顺手报一下谁绑了网易云
-export async function syncWithHub({ hub, members, log = () => {} }) {
+export async function syncWithHub({ hub, members, friends = null, log = () => {} }) {
   const { members: states } = await hub.states();
   const removed = members.sweep(states);
   for (const id of removed) log('purged', id);
+  // 好友圈单独对一遍：只用过好友、没留下别的数据的人也要清（老板不在 hub 里，不算）
+  if (friends) {
+    const active = new Set(states.filter((s) => s.status === 'active').map((s) => s.id));
+    for (const id of friends.ids()) if (!active.has(id) && friends.purge(id)) log('friends-purged', id);
+  }
   const items = Object.fromEntries(members.ids().map((id) => [id, { bound: members.bound(id) }]));
   if (Object.keys(items).length) await hub.report(items);
   return removed;

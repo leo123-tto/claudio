@@ -56,6 +56,30 @@ export function introLine(song, rand = Math.random) {
   return voiceText(pick) || voiceText(`接下来，《${t}》。`);
 }
 
+// 好友推荐的报幕（两版共用）：第一句永远是「XX给你推荐了《Y》」（驾驶模式只念一句也带着是谁推荐的），
+// 附言是别人写的字，原样接在后面念、不进大脑；整段放不进语音上限就不念附言（页面照样显示）。
+// from、note 已经过 friends.js 的 cleanName / cleanNote（没有演出标记、没有括号）。
+export function recNoteLine(from, note) {
+  const n = String(note || '').trim();
+  return n ? `${from}留了句话：${n}${/[。！？!?…~～]$/.test(n) ? '' : '。'}` : '';
+}
+export function recIntro({ from, song, note = '' }, rand = Math.random) {
+  const t = String(song?.title || '').replace(/\s*[(（].*?[)）]\s*/g, '').trim() || String(song?.title || '').trim();
+  const a = String(song?.artist || '').split(' / ')[0];
+  // 念出来的不用「ta」（语音会念成字母）
+  const lead = [`${from}给你推荐了《${t}》，我这就放上。`, `${from}给你推荐了《${t}》，我不剧透，你自己听。`, `${from}给你推荐了《${t}》，这首算${from}点的。`];
+  const head = lead[Math.floor(rand() * lead.length)];
+  const say = `${from}给你推荐了${a ? `${a}的` : ''}《${t}》${note ? `：「${note}」` : '。'}`;
+  return { say, speak: withNote(head, from, note) || voiceText(`${from}给你推荐了《${t}》。`) };
+}
+// 稿子后面接上附言：放得下就接，放不下只念稿子
+export function withNote(text, from, note) {
+  const line = recNoteLine(from, note);
+  const full = line ? `${String(text || '').trim()}${line}` : String(text || '').trim();
+  if (line && plainLen(full) <= VOICE_MAX) return full;
+  return plainLen(text) <= VOICE_MAX ? String(text || '').trim() : '';
+}
+
 export function createVoice({
   ttsUrl = '',
   fetchFn = fetch,

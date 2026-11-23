@@ -12,6 +12,8 @@ import { stripTags } from '../tts/tags.js';
 import { wholeSentences } from './voice.js';
 import { callLocalRaw, buildLocalBody } from '../llm/local.js';
 import { extractJson } from '../llm/normalize.js';
+import { backgroundText, mentionableText } from '../notebook.js';
+import { maxStage, relationText, stageFromPlays } from '../familiarity.js';
 
 export class BrainBusyError extends Error {
   constructor(message = 'DJ 这会儿有点忙') {
@@ -63,36 +65,44 @@ export function publicTone({ at = Date.now(), hour = null, drive = false } = {})
   return toneFor(toneKey({ now: beijingClock(at, hour), drive }), { mild: config.tone.publicLevel === 'mild' });
 }
 
-// 这位朋友和 Vera 的交情，只看 ta 自己的听歌记录（最近听过 100 首封顶；没有就看最近放过 40 首）：
-// 不到 8 首是新朋友，不到 40 首聊过几次，再多就是老朋友。清空记忆后从头算。
-export function familiarity(memory = {}) {
-  const n = Math.max((memory.history || []).length, (memory.recent || []).length);
-  return n < 8 ? 'new' : n < 40 ? 'some' : 'old';
+const activeNotes = (notes) => (Array.isArray(notes) ? notes.filter((note) => note?.status !== 'muted') : []);
+
+// 这位朋友和 Vera 的交情：四档，只升不降（记住过的最高档在 memory.relation）。
+// 只看 ta 自己的听歌记录，清空记忆后从头算。界面上不给数字、不给档位名。
+export function relationStage(memory = {}) {
+  const notes = activeNotes(memory.notes).length;
+  const plays = Math.max((memory.history || []).length, (memory.recent || []).length);
+  return maxStage(stageFromPlays({ plays, notes }), memory.relation?.stage || 'first');
 }
-const FAMILIARITY_TEXT = {
-  new: '新朋友：刚认识，客气里带点俏皮，别装熟，不翻旧账，也别假装记得 ta 的事。',
-  some: '聊过几次：渐渐熟了，可以松一点、开点小玩笑，偶尔提一句 ta 最近放过的歌。',
-  old: '老朋友：很熟了，随口损两句也行，可以翻翻 ta 说过的话和放过的歌（只用下面写着的，别编）。',
-};
+
 // 这位朋友的称呼：来自 hub 的名字，进提示词前去掉换行和标记符号、截短
 export const friendName = (name) => String(name || '').replace(/[#<>`{}[\]]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 12);
 
 // 这份提示词只含这一位朋友自己的数据（memory 是 ta 的）：不带老板的任何信息，也不带别的朋友的。
 // name：hub 里 ta 的名字；extension：这位朋友自己打开了本地语气扩展才传 readToneExtension() 的结果（驾驶模式永远不用）。
 // intro：{title, artist} 给已经选好的这首写开场口播（后台报幕），不选歌、不聊天
-export function buildPrompt({ persona, text, auto, memory, bound, hour, drive = false, tone = null, intro = null, name = '', extension = null, at = Date.now() }) {
+// notes：这次允许她挑的可提往事（已经滤过敏感 / 别再提 / 没挂歌的）；relation：{stage}
+export function buildPrompt({ persona, text, auto, memory, bound, hour, drive = false, tone = null, intro = null, name = '', extension = null, at = Date.now(), notes = [], relation = null }) {
   const theTone = tone || publicTone({ at, hour, drive });
   const mode = personaMode({ toneKey: theTone.key, now: beijingClock(at, hour), text: intro ? '' : text });
   const who = friendName(name);
+  const relationState = relation?.stage ? relation : { stage: relationStage(memory) };
   const lines = [persona.trim(), '', '## 此刻', `北京时间 ${hour} 点。`, '', personaNow(mode), '',
     tonePrompt(theTone, { extension: drive ? null : extension, now: beijingClock(at, hour) }), '',
-    '## 这位朋友', [who ? `称呼：${who}（偶尔叫一声，别每句都叫）。` : '', `交情：${FAMILIARITY_TEXT[familiarity(memory)]}`].filter(Boolean).join('\n')];
+    '## 这位朋友', who ? `称呼：${who}（偶尔叫一声，别每句都叫）。` : '',
+    // 关系只决定怎么说话：变化慢，放前面，帮盒子复用前缀缓存
+    '## 你们的关系（决定怎么说话，不要说出来）', relationText(relationState)].filter(Boolean);
+  if (notes.length) {
+    lines.push('', '## 可提往事（这次能不能提起旧事，只看这里）', mentionableText(notes),
+      '规则：一整期最多提一件，而且必须和这次要放的歌是同一件事（那条挂的歌就在你要放的歌里）；只能从上面挑，挑不到就不提，绝不编。不提就 memoryRef=null。');
+  }
+  const background = backgroundText(activeNotes(memory.notes), { limit: 12 });
+  if (background) lines.push('', '## 她记得的事（稳定背景，用来更懂人；不要拿来当口播开场梗）', background);
   const taste = memory.taste;
   if (taste?.likes?.length) {
     lines.push('', '## 听众网易云里喜欢的歌（抽样）', taste.likes.slice(0, 30).map((s) => `- ${s.title} / ${s.artist}`).join('\n'));
   }
   if (taste?.playlists?.length) lines.push('', '## 听众自建歌单名', taste.playlists.join('、'));
-  if (memory.prefs?.length) lines.push('', '## 听众说过的偏好', memory.prefs.map((p) => `- ${p}`).join('\n'));
   if (memory.recent?.length) {
     lines.push('', '## 最近放过（别重复）', memory.recent.slice(-15).map((s) => `- ${s.title} / ${s.artist}`).join('\n'));
   }
@@ -104,6 +114,11 @@ export function buildPrompt({ persona, text, auto, memory, bound, hour, drive = 
   if (intro) {
     const song = `《${String(intro.title || '').slice(0, 80)}》 / ${String(intro.artist || '').slice(0, 80)}`;
     lines.push('', '## 这次的任务', `不选歌，也不聊天。下一首已经定了：${song}。只给它写一段开场口播，输出 {"say":"…"} 一个字段，其余字段都不要。`);
+    // 好友推荐：只给推荐人的名字，附言不进提示词（那是别人写的字，由代码原样接在后面念）
+    const from = friendName(intro.from);
+    if (from) {
+      lines.push(`这首是听众的朋友「${from}」推荐给听众的。第一句必须是「${from}给你推荐了《${String(intro.title || '').slice(0, 80)}》」，后面最多再说一句为什么此刻放它正好；别替${from}编理由，也别说${from}的事。`);
+    }
   } else {
     lines.push('', '## 听众刚说', auto ? '（没说话，上一段放完了，接着放两首）' : String(text).slice(0, 200));
   }
@@ -133,6 +148,7 @@ export function normalizeReply(obj) {
       .map((m) => String(m?.value || m || '').trim().slice(0, 40))
       .filter(Boolean)
       .slice(0, 2),
+    memoryRef: /^n_[0-9a-z]{4,16}$/i.test(String(obj?.memoryRef || '').trim()) ? String(obj.memoryRef).trim() : null,
   };
 }
 
@@ -191,14 +207,19 @@ export function createBrain({
 
   // 后台报幕：不排队、不抢用户——闸门有人在跑或排着、引擎在忙就等（最多 waitMs，0 = 不等），等不到返回 null。
   // 只在空闲时开一次小请求，不扣朋友的次数；写出来的是 { say, sayTagged }。
-  async function askIdle(input, { waitMs = 0 } = {}) {
+  // 闸门没人在跑、没人排着、引擎也不忙才算空闲；最多等 waitMs（0 = 不等）
+  async function idle(waitMs) {
     const deadline = Date.now() + waitMs;
     for (;;) {
       const free = () => !gate.busy && gate.queued === 0;
-      if (free() && !(await engineBusy()) && free()) break;
-      if (Date.now() >= deadline) return null;
+      if (free() && !(await engineBusy()) && free()) return true;
+      if (Date.now() >= deadline) return false;
       await sleep(2000);
     }
+  }
+
+  async function askIdle(input, { waitMs = 0 } = {}) {
+    if (!(await idle(waitMs))) return null;
     return gate.run(async () => {
       const prompt = buildPrompt({ persona, ...input, auto: true });
       const raw = await call(prompt, {
@@ -214,5 +235,21 @@ export function createBrain({
     });
   }
 
-  return { ask, askIdle, engineBusy, gate };
+  // 好友附言判一句能不能念：和报幕一样只在空闲时问。等不到、判不了都返回 null（调用方按没通过处理）
+  async function judge(prompt, { waitMs = 0 } = {}) {
+    if (!(await idle(waitMs))) return null;
+    return gate.run(async () => {
+      const raw = await call(prompt, {
+        baseUrl,
+        model,
+        timeout: 20_000,
+        getApiKey: () => apiKey,
+        buildBody: (p, opts) => buildLocalBody(p, { ...opts, maxTokens: 20 }),
+      });
+      const ok = extractJson(raw)?.ok;
+      return typeof ok === 'boolean' ? ok : null;
+    });
+  }
+
+  return { ask, askIdle, judge, engineBusy, gate };
 }

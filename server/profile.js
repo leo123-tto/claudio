@@ -17,8 +17,15 @@ export function isFillerEvent(event = {}) {
     || event.song?.filler === true || event.song?.meta?.filler === true;
 }
 
+// 朋友推荐的歌（好友互荐）：放了、听完、跳过、重听都不算老板的口味；只有他自己点的红心 / 不喜欢算
+export function isFriendEvent(event = {}) {
+  return event.discoveryType === 'friend' || event.song?.discoveryType === 'friend' || event.song?.meta?.discoveryType === 'friend';
+}
+const EXPLICIT_SIGNALS = new Set(['explicit_like', 'explicit_dislike', 'favorite', 'dislike']);
+
 export function signalWeight(event = {}) {
   if (isFillerEvent(event)) return 0;
+  if (isFriendEvent(event) && !EXPLICIT_SIGNALS.has(event.type)) return 0;
   if (Object.hasOwn(WEIGHTS, event.type)) return WEIGHTS[event.type];
   if (event.type === 'play_completed') return Number(event.listenRatio) >= 0.8 ? 20 : 0;
   if (event.type === 'play_progress') {

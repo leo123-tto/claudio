@@ -774,3 +774,27 @@ body.playing .drive-key.play .ico-pause { display: block; }
   .drive { padding-left: max(18px, calc(50vw - 380px)); padding-right: max(18px, calc(50vw - 380px)); }
   .drive-title { font-size: 56px; }
 }
+
+/* ── 她想起了你说的那件事：口播下面的小角标，点开是原话 ── */
+.say-memory { margin-top: 6px; }
+.say-memory-btn {
+  border: 1px solid var(--line); background: var(--fill); color: var(--fg-2);
+  font: inherit; font-size: 11.5px; letter-spacing: .04em; padding: 4px 10px;
+  border-radius: 999px; cursor: pointer;
+}
+.say-memory-btn:hover { color: var(--fg); border-color: var(--line-strong); }
+.say-memory-detail {
+  margin-top: 6px; padding: 8px 10px; border-left: 2px solid var(--line-strong);
+  color: var(--fg-2); font-size: 12.5px; line-height: 1.7; white-space: pre-wrap;
+}
+
+/* 记忆面板（点头像）：按四栏列，末尾是笔记本入口 */
+.memory-kind { margin-top: 10px; color: var(--fg-3); font-size: 11.5px; letter-spacing: .16em; }
+.memory-kind:first-child { margin-top: 0; }
+.memory-scroll ul { margin: 4px 0 0; padding-left: 18px; }
+.memory-scroll li { color: var(--fg); }
+.memory-open {
+  display: inline-block; margin-top: 14px; color: var(--fg-2); font-size: 12.5px;
+  text-decoration: none; border-bottom: 1px solid var(--line-strong); padding-bottom: 2px;
+}
+.memory-open:hover { color: var(--fg); }

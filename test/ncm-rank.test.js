@@ -24,6 +24,16 @@ test('网易云没有原唱时一首都不给，不拿翻唱顶替', () => {
   assert.deepEqual(rankHits(hits, { title: '晴天', artist: '周杰伦' }), []);
 });
 
+test('给了歌名就只认这首：同一位歌手的别的歌、合唱里挂名的歌、挂他名字的上传都不算', () => {
+  const hits = [
+    { id: 1, title: '默 (Live)', artist: '李荣浩 / 周杰伦' },
+    { id: 2, title: '我爱你', artist: '周杰伦♚' },
+    { id: 3, title: '枫', artist: '周杰伦' },
+  ];
+  assert.deepEqual(rankHits(hits, { title: '枫', artist: '周杰伦' }).map((hit) => hit.id), [3]);
+  assert.deepEqual(rankHits(hits.slice(0, 2), { title: '雨下一整晚', artist: '周杰伦' }), []);
+});
+
 test('合唱的歌手写全写半都认；各种「xx版」没点名就往后排', () => {
   const hits = [
     { id: 1, title: '甲乙丙丁 (合唱版)', artist: '李佳薇 / 张新成' },

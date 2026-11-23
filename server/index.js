@@ -11,7 +11,7 @@ import { WebSocketServer } from 'ws';
 
 import { config } from './config.js';
 import { createEpisodeBuffer } from './episode-buffer.js';
-import { correctSay } from './episode-coherence.js';
+import { correctSay, spokenArtist } from './episode-coherence.js';
 import { styleConstraints, matchesStyle, matchesResolvedStyle } from './style-request.js';
 import { resolveEpisodeSongs, refreshEpisodeUrls } from './episode-audio.js';
 import { audioCache } from './audio-cache.js';
@@ -48,7 +48,17 @@ import {
 import * as state from './state.js';
 import { startWeather, getCached as getWeather } from './weather.js';
 import { startScheduler } from './scheduler.js';
-import { appendMemory, readMemory } from './memory.js';
+import { appendMemory, readMemory, removeMemoryLine } from './memory.js';
+import {
+  KIND_LABEL,
+  NOTE_KINDS,
+  classifyKind,
+  guessSongs,
+  personalNotebook,
+  stripMemoryStory,
+  validateMemoryRef,
+  notebookIsSource,
+} from './notebook.js';
 import { filterCandidates, orderByPlayOrder, pickDiverse, rankCandidates, selectDiverseShortlist } from './recommendation.js';
 import { ensureDiscoveryPool } from './discovery.js';
 import { episodeCandidates } from './episode-candidates.js';
@@ -62,7 +72,7 @@ import {
 } from './events.js';
 import { watchParentFromEnv } from './parent-watch.js';
 import { listOutputs, selectOutput, openBluetoothSettings } from './audio-route-mac.js';
-import { banStore } from './bans.js';
+import { banStore, songIdentity } from './bans.js';
 import { controlExclusive, exclusiveStatus, materializeAudio, playExclusive, stopExclusive } from './exclusive-play.js';
 import {
   cleanMusicQuery,
@@ -82,6 +92,7 @@ import { looksLikeRoomCommand, matchRoomCommand } from './rooms.js';
 import { roomStore } from './room-store.js';
 import { decodeVoiceAudio, transcribeAudio } from './voice.js';
 import { createDriveState, oneSentence } from './drive.js';
+import { createFriendsLink, buildFriendEpisode, FriendsLinkError } from './friends-link.js';
 import { appVersion } from './version.js';
 import { stripTags } from './tts/tags.js';
 import { readToneExtension, toneFor, toneKey, ttsText } from './tone.js';
@@ -103,6 +114,8 @@ app.use(express.static(config.paths.web, {
   setHeaders: (res, p) => { if (/\.(html|js|css)$/.test(p)) res.setHeader('Cache-Control', 'no-store'); },
 }));
 app.use('/tts', express.static(config.paths.cacheTts)); // 合成的语音
+// 「Vera 的笔记本」：一个页面，四栏记忆，能看能改能删
+app.get('/notebook', (_req, res) => res.sendFile(path.join(config.paths.web, 'notebook.html')));
 
 const favoritesStore = createFavoritesStore({
   file: path.join(config.paths.user, 'favorites.md'),
@@ -153,12 +166,16 @@ function clientError(error) {
   return '这次节目没准备好，请稍后重试';
 }
 
+// 备好的几期说过的话（避免重复）；朋友推荐那期是朋友的名字和附言，不进老板的提示词
+const ownSays = () => episodeBuffer.held().filter((ep) => !ep.friendRec).map((ep) => ep.say);
+
 function commitEpisode(ep, userInput = '') {
   if (userInput) state.addMessage('user', userInput);
   // 这一期开口了才记进对话、才算「上一次开口」；没开口的只算在听
   if (ep.say && !ep.muted) talkTracker.markSpoken(ep.speakStamp || talkStamp());
   else talkTracker.markPlayed();
-  if (!ep.muted) state.addMessage('claudio', ep.say);
+  // 朋友推荐那期的报幕带着朋友的名字和附言：不记进对话（对话会进老板的提示词）
+  if (!ep.muted && !ep.friendRec) state.addMessage('claudio', ep.say);
   const recommendation = historyDetails.get(ep) || {};
   if (recommendation.fingerprint && ep.queue.some((item) => item.type === 'song')) {
     const playedLane = ep.queue.map((item) => item.meta?.lane).find((lane) => ['popular', 'fresh', 'classic'].includes(lane));
@@ -195,6 +212,8 @@ function updatePins() {
 }
 
 const driveState = createDriveState();
+// 好友互荐：好友数据在公用版容器里，经盒子本机内部口去要（FRIENDS_URL，不设就关）
+const friendsLink = createFriendsLink(process.env.FRIENDS_URL || '');
 // 此刻的口播语气档（server/tone.js）；本地语气扩展只在个人版、设置里开着时用
 function currentTone() {
   return toneFor(toneKey({ scene: currentScene(), drive: driveState.on() }));
@@ -224,16 +243,35 @@ const episodeBuffer = createEpisodeBuffer({
   // 领取时定这一期说不说：当面说话的回复不走领取，永远开口
   speaks: (ep) => {
     ep.speakStamp = talkStamp();
-    return speakReasons(talkLevel(), talkTracker.context(ep.speakStamp)).length > 0;
+    // 朋友推荐的歌：口播频率再低也报是谁推荐的（talk.js 的 recommended）
+    return speakReasons(talkLevel(), { ...talkTracker.context(ep.speakStamp), recommended: Boolean(ep.friendRec) }).length > 0;
   },
+  deferVoice: (ep) => !ep.friendRec && ['quiet', 'minimal'].includes(talkLevel()), // 朋友推荐那期永远开口，先合成
   capacity: config.episodeBuffer,
   enabled: () => process.env.CLAUDIO_SKIP_PREFETCH !== '1',
   hasClients: () => clients.size > 0,
   listening: () => clients.size > 0,
   // 后台备出来一首歌都没有（多半是网易云限流、搜索超时）就不进缓冲，按失败退避重试；免得两格都是「没找到能放的」、后台停住。
   build: (options) => ncm.withNcmSource('background', async () => {
+    // 朋友推荐给老板的歌先排一期（只这一首）；没有、连不上、放不了都照常备节目
+    const fromFriend = await buildFriendEpisode({
+      link: friendsLink, epoch: options.epoch, tone: currentTone(), drive: driveState.on(),
+      songUrl: (id) => services.ncm.songUrl(id, undefined, { signal: options.signal }),
+      resolve: (song) => services.ncm.resolve(song, { signal: options.signal }),
+      cacheHas: (id) => services.cache.has(id), log: (...args) => console.warn('[friends]', ...args),
+      banned: (song) => banStore.list().some((ban) => songIdentity(ban) === songIdentity(song)),
+    }).catch(() => null);
+    if (fromFriend) {
+      options.signal?.throwIfAborted();
+      const item = fromFriend.queue[0];
+      void services.ncm.lyric(item.meta.id).then((lyric) => {
+        item.meta.lyric = lyric;
+        if (lyric) broadcast({ kind: 'lyrics', id: fromFriend.id, tracks: [{ ...item.meta }] });
+      }).catch(() => {});
+      return fromFriend;
+    }
     // 后台节目没人等，解析预算放宽到 90 秒：网易云搜索每分钟有上限，排队的候选来得及轮到。
-    const ep = await buildEpisode({ ...options, mood: recommendationMood, resolveTimeout: BACKGROUND_RESOLVE_BUDGET_MS });
+    const ep = await buildEpisode({ ...options, recentSays: ownSays(), mood: recommendationMood, resolveTimeout: BACKGROUND_RESOLVE_BUDGET_MS });
     if (ep.intent === 'recommend' && !ep.queue.length) throw new Error('后台节目没有能放的歌');
     return ep;
   }),
@@ -250,7 +288,11 @@ const episodeBuffer = createEpisodeBuffer({
     updatePins();
     return ep;
   },
-  commit: (ep) => { currentEpisode = ep; commitEpisode(ep); },
+  commit: (ep) => {
+    currentEpisode = ep;
+    commitEpisode(ep);
+    if (ep.friendRec) friendsLink?.post('played', { rec: ep.friendRec.id }).catch(() => {});
+  },
   emit: (message) => {
     if (message.kind === 'episodesInvalidated') {
       scheduledRequest = null;
@@ -264,7 +306,8 @@ const episodeBuffer = createEpisodeBuffer({
 });
 const filler = createFillerService({
   candidates: (exclude) => fillerCandidates({
-    favorites: favoritesStore.list(), recent: [...readEvents(200).filter((e) => ['play_started', 'play_completed'].includes(e.type)).map((e) => e.song).filter(Boolean), ...successfulSongs.values()],
+    // 朋友推荐的歌不当垫场歌（不算老板的口味）
+    favorites: favoritesStore.list(), recent: [...readEvents(200).filter((e) => ['play_started', 'play_completed'].includes(e.type) && e.discoveryType !== 'friend').map((e) => e.song).filter(Boolean), ...successfulSongs.values()],
     played: readEvents(400).filter((e) => ['play_started', 'play_completed'].includes(e.type)).map((e) => e.song).filter(Boolean),
     banned: banStore.list(), held: episodeBuffer.exclusions(), exclude,
     cached: (id) => services.cache.has(id),
@@ -325,9 +368,16 @@ function assemblePlayable(resolved, recommendation = {}, byOrder = false, limit 
   return { resolved, songs: orderByPlayOrder(picked) };
 }
 
+// 大脑点的几首都是同一位歌手（按第一位算），而且听众这句话里提到了 ta，就算点名了这位歌手
+export function namedArtist(play = [], userInput = '') {
+  const names = (play || []).map((song) => spokenArtist(song?.artist)).filter(Boolean);
+  if (!names.length || new Set(names).size !== 1) return '';
+  return String(userInput || '').includes(names[0]) ? names[0] : '';
+}
+
 export async function finalizeEpisode(result, {
   recommendation = {}, signal, resolveLimit = 0, epoch = episodeBuffer.snapshot().epoch, chat = false,
-  nowPlaying = null, resolveTimeout = RESOLVE_BUDGET_MS, tone = currentTone(), single = false,
+  nowPlaying = null, resolveTimeout = RESOLVE_BUDGET_MS, tone = currentTone(), single = false, userInput = '',
 } = {}) {
   signal?.throwIfAborted();
   const constraints = styleConstraints(recommendation.styleRequest);
@@ -352,6 +402,9 @@ export async function finalizeEpisode(result, {
   }
   const resolvedCache = new Map();
   const deadline = Date.now() + resolveTimeout;
+  // 听众点名了歌手（大脑点的几首都是这位、这句话里也提到了 ta）：放不了就少放或直说，不拿发现池里别人的歌补
+  const asked = chat ? namedArtist(result.play, userInput) : '';
+  const byAsked = (song) => !asked || String(song.artist || '').split(/\s*\/\s*/).some((name) => name.trim() === asked);
   async function select(relaxed) {
     signal?.throwIfAborted();
     const options = { ...recommendation, ...(relaxed ? { recentSongs: [] } : {}), onDrop: drop };
@@ -361,7 +414,7 @@ export async function finalizeEpisode(result, {
     let shortlist = styleMode ? ranked.slice(0, 6) : selectDiverseShortlist(ranked, recommendation.discoveryLane, 6);
     // 点歌时听众要的是大脑点名的那几首：先找它们，发现池只补空位（自动节目照旧按多样性挑）。
     if (chat) shortlist = [...orderByPlayOrder(ranked.filter((song) => song.playOrder != null)),
-      ...shortlist.filter((song) => song.playOrder == null)].slice(0, 6);
+      ...shortlist.filter((song) => song.playOrder == null && byAsked(song))].slice(0, 6);
     if (resolveLimit > 0) shortlist = shortlist.slice(0, resolveLimit);
     for (const song of filtered) if (!shortlist.includes(song)
       && !shortlist.some((item) => candidateKey(item) === candidateKey(song))) drop(song, 'shortlist-limit');
@@ -424,15 +477,37 @@ export async function finalizeEpisode(result, {
       final: songs.map(name),
     }));
   }
-  const fullSay = emptyRecommendation ? '这会儿没找到能放的，先接着听这首。'
+  const fullSay = emptyRecommendation ? (asked ? `${asked}的歌这会儿拿不到，先接着听这首。` : '这会儿没找到能放的，先接着听这首。')
     : result.intent === 'recommend' ? correctSay(result.say, result.play || [], songs) : result.say;
   // 驾驶模式：提示词已经要求一句话，这里再兜一次底
-  const say = driveState.on() ? oneSentence(fullSay) : fullSay;
-  // 念的版本：大脑原话没被改过才带它写的演出标记；改过（校正歌名、驾驶模式截短、没歌可放）就念干净的
+  let say = driveState.on() ? oneSentence(fullSay) : fullSay;
+  // 口播提了哪件旧事：必须是这次给过她的候选、还活着、而且那条挂的歌真的在放。
+  const mentionable = recommendation?.mentionable || [];
+  const memoryRef = validateMemoryRef({
+    refId: result.memoryRef,
+    candidates: mentionable,
+    playedSongs: songs,
+  });
+  if (!memoryRef && result.memoryRef) {
+    // 大脑说引用了某条旧事，但那条挂的歌没放成：光丢掉引用不够，说出口的那句也得摘掉。
+    const claimed = mentionable.find((note) => note.id === result.memoryRef);
+    if (claimed) {
+      const stripped = stripMemoryStory(say, claimed);
+      if (stripped.stripped) {
+        // 摘空了就换成一句不提旧事的收尾，节目照放。
+        say = stripped.say || (result.intent === 'recommend' ? '接着听这首。' : '嗯，我在。');
+      }
+    }
+    console.log('[记忆引用不成立]', JSON.stringify({ id: result.memoryRef, stripped: say !== fullSay }));
+  }
+  // 念的版本：大脑原话没被改过才带它写的演出标记；改过（校正歌名、驾驶模式截短、没歌可放、摘掉旧事）就念干净的
   const sayTts = say ? ttsText(say === result.say ? (result.sayTagged || say) : say, tone) : '';
+  // 只记 id：收听事件日志里不落记忆原文（原文只存在笔记本里，删了就没了）。
+  if (memoryRef) logEvent({ type: 'memory_cited', key: memoryRef.id });
   const ep = {
     id: randomUUID(), epoch, sayWrittenAt: Date.now(), say, sayTts, intent: result.intent,
     action: result.action, actionValue: result.actionValue, reason: result.reason,
+    ...(memoryRef ? { memoryRef } : {}),
     voice: { status: say && !(emptyRecommendation && !chat) ? 'pending' : 'skipped' },
     queue: songs.map((song) => ({ type: 'song', url: services.cache.has(song.id) ? `/media/${song.id}` : song.url,
       meta: { id: song.id || '', title: song.title, artist: song.artist, lyric: song.lyric || '',
@@ -457,7 +532,7 @@ export async function finalizeEpisode(result, {
 
 async function buildEpisode({ userInput = '', mood = '', sleep = null, nowPlaying = null,
   briefSay = false, resolveLimit = 0, resolveTimeout, signal, epoch = episodeBuffer.snapshot().epoch,
-  excludeSongs = episodeBuffer.exclusions(), recentSays = episodeBuffer.held().map((ep) => ep.say),
+  excludeSongs = episodeBuffer.exclusions(), recentSays = ownSays(),
 } = {}) {
   // 话多档：自动节目一段只放一首，每首歌前都有口播（点歌不受影响）
   const single = !userInput && talkLevel() === 'chatty';
@@ -490,7 +565,7 @@ async function buildEpisodeStream({ userInput = '', mood = '', sleep = null, now
   const isValid = () => isCurrent() && !signal.aborted;
   const drive = driveState.on();
   const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, drive, toneExtension: toneExtensionOn(),
-    excludeSongs: episodeBuffer.exclusions(), recentSays: episodeBuffer.held().map((ep) => ep.say) });
+    excludeSongs: episodeBuffer.exclusions(), recentSays: ownSays() });
   const { tone } = bundle;
   // 大脑写的 say 带演出标记：页面和记录用去掉标记的（驾驶模式再截成一句），语音用带标记、带时段语气的
   const tidy = (raw) => String(raw || '').replace(/\s+/g, ' ').trim();
@@ -563,7 +638,7 @@ async function buildEpisodeStream({ userInput = '', mood = '', sleep = null, now
   const obj = extractJson(raw);
   if (!obj || typeof obj.say !== 'string') throw new Error('大脑返回的节目格式不完整');
   const result = normalizeResult(obj);
-  episode = await finalizeEpisode(result, { recommendation: bundle.recommendation, signal, chat: true, nowPlaying, tone });
+  episode = await finalizeEpisode(result, { recommendation: bundle.recommendation, signal, chat: true, nowPlaying, tone, userInput });
   signal.throwIfAborted();
   mark('songsReady');
   if (live && liveText !== episode.sayTts) {
@@ -586,9 +661,24 @@ async function buildEpisodeStream({ userInput = '', mood = '', sleep = null, now
     } else announce();
   }
   if (userInput && result.memoryCandidates?.length) {
-    const evidenceId = `message-${randomUUID()}`;
-    for (const item of result.memoryCandidates) logEvent({ type: 'memory_inferred', key: item.key, value: item.value, evidenceId, source: 'llm' });
-    for (const item of currentProfile().memories.stable) appendMemory(item.value);
+    // 迁移后记忆的唯一来源是笔记本：新学到的事直接写进笔记本（source: inferred，敏感词自动标 quiet）。
+    // 事件日志和 memory.md 都不再写记忆正文 —— 否则笔记本里删掉的那条会从别处漏回提示词。
+    if (notebookIsSource()) {
+      const book = personalNotebook();
+      for (const item of result.memoryCandidates) {
+        book.create({
+          kind: classifyKind(item.value),
+          text: item.value,
+          quote: item.evidence || item.value,
+          songs: guessSongs(item.value),
+          source: 'inferred',
+        });
+      }
+    } else {
+      const evidenceId = `message-${randomUUID()}`;
+      for (const item of result.memoryCandidates) logEvent({ type: 'memory_inferred', key: item.key, value: item.value, evidenceId, source: 'llm' });
+      for (const item of currentProfile().memories.stable) appendMemory(item.value);
+    }
   }
   return episode;
 }
@@ -924,6 +1014,78 @@ app.get('/api/lyric', async (req, res) => {
 // 记忆：Claudio 慢慢记下的关于 ta 的事（人可读文档 user/memory.md 的内容）
 app.get('/api/memory', (_req, res) => res.json({ ok: true, memory: readMemory(200) }));
 
+// ── 笔记本（结构化长期记忆：人 / 习惯 / 歌 / 事）──
+// 只影响下一期起用不用它，不回头改已经备好的节目。
+const notebook = () => personalNotebook();
+const notePatch = (body = {}) => {
+  const patch = {};
+  if (typeof body.text === 'string') patch.text = body.text;
+  if (typeof body.quote === 'string') patch.quote = body.quote;
+  if (typeof body.kind === 'string' && NOTE_KINDS.includes(body.kind)) patch.kind = body.kind;
+  if (body.sensitive === 'quiet' || body.sensitive === 'normal') patch.sensitive = body.sensitive;
+  if (body.status === 'active' || body.status === 'muted') patch.status = body.status;
+  if (Array.isArray(body.songs)) patch.songs = body.songs;
+  return patch;
+};
+
+app.get('/api/notebook', (_req, res) => {
+  const store = notebook();
+  // 关系一个字都不下发：界面不该看见档位名，更不该看见数字
+  res.json({
+    ok: true,
+    migrated: notebookIsSource(store),
+    kinds: NOTE_KINDS.map((key) => ({ key, label: KIND_LABEL[key] })),
+    notes: store.list(),
+  });
+});
+
+app.post('/api/notebook', (req, res) => {
+  const note = notebook().create({ ...notePatch(req.body), source: 'manual' });
+  if (!note) return res.status(400).json({ ok: false, error: '内容太短' });
+  res.json({ ok: true, note });
+});
+
+app.patch('/api/notebook/:id', (req, res) => {
+  const note = notebook().update(String(req.params.id), notePatch(req.body));
+  if (!note) return res.status(404).json({ ok: false, error: '没找到这条' });
+  res.json({ ok: true, note });
+});
+
+app.delete('/api/notebook/:id', (req, res) => {
+  const store = notebook();
+  const note = store.find(String(req.params.id));
+  if (!note || !store.remove(note.id)) return res.status(404).json({ ok: false, error: '没找到这条' });
+  // 旧文件只是回滚备份，但备份里留着已删的原句等于「删了还在」，一起清掉。
+  if (note.source === 'legacy') removeMemoryLine(note.text);
+  res.json({ ok: true });
+});
+
+// 好友互荐：网页和公用版一样走 /api/friends/*，这里转给公用版容器的内部口（老板的 id 固定是 owner）。
+// 推荐时歌的信息由这里填（正在放的 / 网页给的这一首），只送歌名、歌手、id、封面、时长，不送别的。
+function sendFriends(res, promise) {
+  promise.then((data) => res.json(data ?? { ok: true })).catch((error) => {
+    const status = error instanceof FriendsLinkError ? error.status : 500;
+    res.status(status).json(error.body || { error: 'server_error', message: '出了点问题' });
+  });
+}
+app.get('/api/friends', (_req, res) => {
+  if (!friendsLink) return res.status(404).json({ error: 'not_found' });
+  sendFriends(res, friendsLink.overview());
+});
+app.post('/api/friends/:action', (req, res) => {
+  if (!friendsLink) return res.status(404).json({ error: 'not_found' });
+  const action = String(req.params.action);
+  const body = req.body || {};
+  if (action === 'recommend') {
+    const song = body.song || {};
+    const pick = { id: song.id, title: String(song.title || ''), artist: String(song.artist || ''), cover: String(song.cover || ''), duration: Number(song.duration) || 0 };
+    return sendFriends(res, friendsLink.post('recommend', { to: String(body.to || ''), song: pick, note: String(body.note || '') }));
+  }
+  // 网页只能做这几样；领下一首、标已播这些由后台自己调
+  if (!['code', 'add', 'remove', 'block', 'unblock', 'profile', 'like'].includes(action)) return res.status(404).json({ error: 'not_found' });
+  sendFriends(res, friendsLink.post(action, body));
+});
+
 app.get('/api/profile', (_req, res) => {
   const profile = currentProfile();
   res.json({
@@ -1254,7 +1416,7 @@ app.post('/api/outputs', async (req, res) => {
 // 网页（web/，两版同一份）先问这个，决定露出哪些控件、加载哪个播放引擎（web/boot.js）
 app.get('/api/mode', (_req, res) => res.json({
   mode: 'personal',
-  features: { settings: true, dislike: true, prev: true, stop: true, outputs: true, sleep: true, voice: true, meter: true, webFonts: true, drive: true, driveSync: true },
+  features: { settings: true, dislike: true, prev: true, stop: true, outputs: true, sleep: true, voice: true, meter: true, webFonts: true, drive: true, driveSync: true, notebook: true, ...(friendsLink ? { friends: true } : {}) },
   version: appVersion(),
 }));
 app.get('/api/status', (_req, res) => res.json({
@@ -1291,6 +1453,8 @@ app.post('/api/fav', (req, res) => {
   }
   const count = state.addFav({ title, artist });
   logEvent({ type: 'favorite', song: { title, artist }, source: 'button', discoveryType });
+  // 朋友推荐来的歌，红心也算「好听」，告诉推荐人
+  if (req.body?.friendRec) friendsLink?.post('like', { rec: String(req.body.friendRec) }).catch(() => {});
   const remembered = artist ? favoritesStore.rememberSong({ title, artist }) : null;
   noteTasteChanged();
   console.log(`[收藏] ${title} — ${artist}（曲库 ${remembered?.total ?? count} 首，${remembered?.added ? '新记下' : '已在库里'}）`);
@@ -1414,6 +1578,9 @@ if (process.env.CLAUDIO_NO_LISTEN !== '1') server.listen(config.port, config.hos
       setTimeout(ensureNext, 20);
     })
     .catch((error) => console.warn('[discovery]', error.message));
+  // 启动就重写一次品味摘要：老版本会把「已确认的偏好」（记忆原文）写进这个文件，
+  // 笔记本里删掉的那条不能从这个缓存漏回提示词。
+  refreshTasteDigest();
   ensureNext(); // 启动即预热第一期；发现池若刚重建，这一期会被丢掉并按新池重做
   // 节律默认关闭（老板：只手动触发）；SCHEDULER_ENABLED=1 才开 07:00 规划 / 09:00 早间 / 整点情绪
   if (config.scheduler.enabled) {

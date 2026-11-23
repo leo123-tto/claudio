@@ -26,12 +26,12 @@ export function renderTasteDigest({ profile = {}, events = [] } = {}) {
   const songLine = names(songs, (item) => `《${item.title}》${item.artist || ''}`, 6);
   const likeLine = names(likes, (item) => `《${item.title}》— ${item.artist || '未知'}`, 6);
   const avoidLine = names(avoided, (item) => item.artist, 4);
-  const stable = (profile.memories?.stable || []).slice(-3).map((item) => item.value).filter(Boolean);
+  // 只写口味（歌手 / 歌 / 亲口说过喜欢），不写「已确认的偏好」那种记忆文字 ——
+  // 记忆的唯一来源是笔记本，这里再写一遍，笔记本里删掉的条目就会从这里漏回提示词。
   if (artistLine.length) lines.push(`常被正向记住的歌手：${artistLine.join('、')}`);
   if (songLine.length) lines.push(`明确喜欢过的歌：${songLine.join('、')}`);
   if (likeLine.length) lines.push(`最近亲口说好听或点过爱心：${likeLine.join('、')}`);
   if (avoidLine.length) lines.push(`先少放的歌手：${avoidLine.join('、')}`);
-  if (stable.length) lines.push(`已经确认的偏好：${stable.join('；')}`);
   if (!artistLine.length && !songLine.length && !likeLine.length) {
     lines.push('还没有亲口记下的喜欢。听到好听的，说「好听」或点爱心就会记在这里。');
   }

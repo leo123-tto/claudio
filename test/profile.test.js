@@ -73,3 +73,24 @@ test('等待时的垫歌行为不改变画像或稳定记忆', () => {
   assert.deepEqual(profile.artists, []);
   assert.deepEqual(profile.memories, { stable: [], pending: [] });
 });
+
+test('朋友推荐的歌：放了、听完、跳过、重听都不进画像，只有自己点的红心 / 不喜欢算', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { createEventStore } = await import('../server/events.js');
+  const store = createEventStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ev-')), 'e.jsonl'), { scene: () => 'work' });
+  const song = { title: '朋友的歌', artist: '朋友的歌手' };
+  for (const event of [
+    { type: 'play_started', song, discoveryType: 'friend', source: 'player' },
+    { type: 'play_completed', song, discoveryType: 'friend', listenRatio: 1, source: 'player' },
+    { type: 'replay', song, discoveryType: 'friend', source: 'player' },
+    { type: 'skip', song: { title: '另一首', artist: '另一位' }, discoveryType: 'friend', listenedSec: 2, source: 'player' },
+  ]) store.append(event);
+  const passive = store.read();
+  assert.ok(passive.every((e) => e.discoveryType === 'friend'), '事件落盘时带着来源');
+  assert.deepEqual(deriveProfile(passive).songs, []);
+  assert.deepEqual(deriveProfile(passive).artists, []);
+  store.append({ type: 'favorite', song, discoveryType: 'friend', source: 'button' });
+  assert.equal(deriveProfile(store.read()).songs[0].score, 80);
+});

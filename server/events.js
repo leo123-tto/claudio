@@ -8,7 +8,7 @@ import { currentScene } from './scene.js';
 const EVENT_TYPES = new Set([
   'play_started', 'play_progress', 'play_completed', 'skip', 'replay',
   'favorite', 'unfavorite', 'dislike', 'explicit_like', 'explicit_dislike', 'repeated_request',
-  'memory_inferred', 'recommendation', 'play_failed',
+  'memory_inferred', 'memory_cited', 'recommendation', 'play_failed',
 ]);
 
 function clean(value, max = 200) {

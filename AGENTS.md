@@ -124,17 +124,22 @@ claudio/
 │  │  ├─ fish.js             # Fish Audio 云端（手动备用）
 │  │  ├─ abort.js            # 合成可取消（换歌 / 作废节目时停掉在途请求）
 │  │  └─ say.js              # macOS say 手工开发选项（不参与自动兜底）
+│  ├─ friends-link.js        # 好友互荐（个人版这头）：经同一台机器上的内部口（FRIENDS_URL）找公用版要朋友推荐的歌、做成单独一期；推荐出去 / 好听 / 已播也走这里。不设 FRIENDS_URL 就关
 │  ├─ handoff.js             # 多设备接力：当前歌 / 进度 / 后面几首 / 哪台在响，存 cache/playback.json；一台开始响就推 WS handoff
 │  ├─ scene.js               # 此刻场景：工作日 / 周末 + 时段 → 工作模式 / 午休 / 周末…；听众说「我在上班」记进 cache/scene.json，当天或 2 小时内有效（午休 12:00–13:30 自动放开，午休时再说才算）；不用定位
 │  ├─ weather.js             # wttr.in 天气（注入选歌 prompt）
-│  ├─ memory.js              # 长期记忆 append → user/memory.md
+│  ├─ memory.js              # 长期记忆 append → user/memory.md（迁移到笔记本后只当回滚备份，不再注入）
+│  ├─ notebook.js            # 「Vera 的笔记本」：人 / 习惯 / 歌 / 事 四栏结构化记忆，来源 / 时间 / 敏感级；挑可提往事、校验口播引用、真删除（连备份一起清）
+│  ├─ familiarity.js         # 隐性关系进度：第一次听 / 熟客 / 老友 / 只对你，只升不降，界面不出现数字；注入的只是「怎么说话」
 │  ├─ scheduler.js           # 节律调度（默认关；.env SCHEDULER_ENABLED=1 才开）
 │  ├─ state.js               # messages / plays / favs 持久化（cache/state.json）
 │  └─ public/                # 公用版（CLAUDIO_MODE=public，单独容器）：设备核验走 hub（docs/hub-api.md）、每人加密存网易云 cookie 和临时记忆
+│                            #   好友互荐：friends.js（好友码、推荐、上限、屏蔽、过期，一份加密文件 friends.enc）、friends-routes.js（/api/friends/* 和个人版用的只听本机的内部口 /owner/*）
 ├─ user/                     # 让 Claudio 属于你的几个文件
 │  ├─ taste.md               # 听歌口味 ✅ 注入 prompt
 │  ├─ favorites.md           # 喜欢的歌曲库（gen-favorites 生成）✅ 注入
-│  ├─ memory.md              # 长期记忆（DJ 自动沉淀、可手改）✅ 注入
+│  ├─ memory.md              # 旧长期记忆（DJ 自动沉淀、可手改）；迁到 notebook.json 后不再注入，只留作回滚
+│  ├─ notebook.json          # Vera 的笔记本（四栏记忆）；存在即接管记忆源，提示词只读它
 │  ├─ routines.md            # 作息节律 ✅ 注入（结合此刻在一天中的位置挑歌）
 │  ├─ mood-rules.md          # 情绪规则 ✅ 注入（按状态 / 天气 / 时段调整）
 │  └─ playlists.json         # 歌单 ✅ 注入（填真实歌单即生效，占位示例自动过滤）
@@ -163,6 +168,8 @@ claudio/
    ├─ handoff.js             # 本机设备号（localStorage）和设备名（Mac Chrome / iPhone Safari…）
    ├─ voice-stream.js        # 口播边收边播：/api/tts/stream 用 MediaSource（iPhone 用 ManagedMediaSource）喂块，打不开就直接放
    ├─ drive.js               # 驾驶模式（两版共用，只管界面）：大键转给原按钮、说话（个人版走「说话」，公用版浏览器听写→键盘听写）、Wake Lock、记住开关
+   ├─ friends.js / friends.css # 好友互荐（两版共用）：好友面板（好友码、好友、收到的 / 发出的、昵称、接收开关）、推荐给谁、「来自 XX」；引擎换歌时发 claudio:now
+   ├─ notebook.html/.js/.css # 「Vera 的笔记本」页面（两版共用，/notebook）：四栏卡片，能看、能改、能删、能标别再提；她引用的那条点开看原话
    ├─ window-mode.js         # 沉浸歌词（顶栏按钮 / F 进，Esc / 轻点空白退）：能网页全屏就全屏，iPhone Safari 等不给就页面内铺满；闲置隐藏控件
    └─ styles.css
 ```
@@ -173,7 +180,9 @@ claudio/
 
 字段顺序和含义以 `prompts/dj-persona.md` 为准，解析在 `server/llm/normalize.js`：
 
-`say`、`intent`（chat / recommend / control）、`action`、`actionValue`、`play`、`reason`、`memoryCandidates`。
+`say`、`intent`（chat / recommend / control）、`action`、`actionValue`、`play`、`reason`、`memoryCandidates`、`memoryRef`。
+
+`memoryRef` 是这一期口播引用了「可提往事」里的哪一条（`n_xxxx`）；必须是当次给过她的候选、没标「别再提」、不是敏感条目，而且那条挂的歌真的在 `play` 里，否则一律丢掉（`notebook.validateMemoryRef`）。
 
 - `say`：40–80 字，要有内容（为什么此刻放、有把握的背景、偶尔聊一句），不引歌词、不编背景。可带 Drama 3 演出标记（白名单见 `server/tts/tags.js`，按语气档放行）；`normalize.js` 出两份：`say` 去标记（页面、记录、校正都用它），`sayTagged` 原样，节目上的 `sayTts` = 时段语气提示 + 清洗后的标记，只给语音。
 - `play` 为 `[]` = 不换歌。推荐才给候选：默认 3 个，点了曲风 / 乐器 / 情绪给 5 个，只放前两首；聊天和控制不给歌。
@@ -245,7 +254,11 @@ MVP 4 条 → 全功能 6 条：
 | POST | `/api/fav` | 收藏当前歌（落库进品味）；`remove:true` 取消收藏 | ✅ |
 | GET | `/api/favorites` | 当前本机口味曲库数量 | ✅ |
 | POST | `/api/favorites/import` | 网易云歌单链接 / ID 合并导入口味曲库 | ✅ |
-| GET | `/api/memory` | 读长期记忆 | ✅ |
+| GET | `/api/memory` | 读旧长期记忆（迁移后基本只作回滚） | ✅ |
+| GET | `/api/notebook` | 笔记本：四栏记忆 + 关系的一个说法（不给数字） | ✅ |
+| POST | `/api/notebook` | 记一条（人 / 习惯 / 歌 / 事） | ✅ |
+| PATCH | `/api/notebook/:id` | 改一条 / 标「别再提」/ 恢复 | ✅ |
+| DELETE | `/api/notebook/:id` | 删一条（真删，备份同步清） | ✅ |
 | GET | `/api/weather` | 当前天气 | ✅ |
 | GET | `/api/fish-credit` | Fish 余额（key 只在后端） | ✅ |
 | POST | `/api/settings/test-pc5090-tts` | 5090 语音试听（设置页「试听」），冷启动要等约 2 分钟 | ✅ |
@@ -263,6 +276,8 @@ MVP 4 条 → 全功能 6 条：
 | POST | `/api/remote/control` | 同上来源。`pause` / `resume` / `next` / `previous` / `stop` / `volume_set` | ✅ |
 | GET | `/api/playback` | 多设备接力：服务端记的当前歌、进度（在响时按时间往前推）、后面几首、哪台在响；直链先刷新 | ✅ |
 | POST | `/api/playback` | `{deviceId, deviceName, playing, song, position, queue}`：设备上报；开始响时 WS 推 `handoff`，别的设备自己停 | ✅ |
+| GET | `/api/friends` | 好友互荐：自己的好友、收到的、发出的（发出的不给看被跳过）、今天还能推几首。个人版转给公用版内部口（`FRIENDS_URL`），没配回 404 | ✅ |
+| POST | `/api/friends/:action` | `code` 生成好友码（15 分钟、用一次）· `add {code}` · `remove / block / unblock {id}` · `profile {nick, accept}` · `recommend {to, song, note}`（附言 ≤30 字，本地规则不过整条不发）· `like {rec}` | ✅ |
 | GET | `/api/taste` | 读用户口味档案 | 未实现 |
 | GET | `/api/plan/today` | 今日节目编排 | 未实现 |
 

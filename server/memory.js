@@ -36,6 +36,46 @@ export function appendMemory(text) {
   } catch (e) { console.warn('[记忆] 写入失败：', e.message); return false; }
 }
 
+// 和 memory.md 同源的副本：同一个目录下的 memory.md.*（老板手动的 .bak），以及迁移备份目录里的拷贝。
+// 迁移后 memory.md 只当回滚备份，但备份里留着已删的原句，等于「删了还在」，所以删一条时这些一起清。
+function legacyCopies() {
+  const files = new Set([FILE]);
+  const collect = (dir) => {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return; }
+    for (const name of names) if (/^memory\.md($|\.)/.test(name)) files.add(path.join(dir, name));
+  };
+  collect(config.paths.user);
+  const backupRoot = path.join(config.paths.dataRoot, 'notebook-migration-backup');
+  let stamps = [];
+  try { stamps = fs.readdirSync(backupRoot); } catch { stamps = []; }
+  for (const stamp of stamps) {
+    collect(path.join(backupRoot, stamp, 'user'));
+    collect(path.join(backupRoot, stamp));
+  }
+  return [...files];
+}
+
+// 笔记本里删掉一条时，把 memory.md（和它的备份副本）里对应的那行也删掉。
+export function removeMemoryLine(text) {
+  const fact = bodyOf(`- ${String(text || '')}`);
+  if (!fact) return 0;
+  let removed = 0;
+  for (const file of legacyCopies()) {
+    let lines;
+    try { lines = fs.readFileSync(file, 'utf8').split('\n'); } catch { continue; }
+    const kept = lines.filter((line) => bodyOf(line) !== fact);
+    const count = lines.length - kept.length;
+    if (!count) continue;
+    try {
+      fs.writeFileSync(file, kept.join('\n'), { mode: 0o600 });
+      fs.chmodSync(file, 0o600);
+      removed += count;
+    } catch (e) { console.warn('[记忆] 删除失败：', e.message); }
+  }
+  return removed;
+}
+
 // 给 context 注入：最近 n 条记忆文本（注入有上限，防 prompt 过长）；没有返回 ''
 export function readMemory(n = 60) {
   return readLines().slice(-n).join('\n');

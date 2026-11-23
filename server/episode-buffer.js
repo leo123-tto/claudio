@@ -10,6 +10,8 @@ export function createEpisodeBuffer({
   synthesize, emit = () => {}, hasClients = () => false, now = Date.now,
   enabled = () => true, offline = () => false, changed = () => {}, listening = () => true,
   speaks = () => true, // 口播频率：领取时问一次这一期说不说（server/talk.js）
+  // 安静 / 几乎不说档：多半不开口，备好时先不合成（不白占 5090），领取时定了要说再合成
+  deferVoice = () => false,
   setTimer = setTimeout, clearTimer = clearTimeout,
 } = {}) {
   capacity = Math.max(1, Number(capacity) || 2);
@@ -43,7 +45,7 @@ export function createEpisodeBuffer({
   function deliver(ep) {
     stale(ep);
     if (ep.muted === undefined) ep.muted = Boolean(ep.say) && !speaks(ep);
-    if (!ep.muted) return ep;
+    if (!ep.muted) { void voice(ep); return ep; }
     skipVoice(ep);
     return { ...ep, say: '', sayTts: '', voice: { status: 'skipped' }, queue: ep.queue.filter((item) => item.type !== 'tts') };
   }
@@ -66,9 +68,14 @@ export function createEpisodeBuffer({
     ep.voice ||= { status: ep.say ? 'pending' : 'skipped' };
     return ep;
   }
+  // 这一期现在该不该合成：领取时定了不开口的不合成；还没领取、又是多半不开口的档，等领取再说
+  function wantVoice(ep) {
+    if (ep.muted !== undefined) return !ep.muted;
+    return !deferVoice(ep);
+  }
   async function voice(ep) {
     stale(ep);
-    if (!synthesize || !valid(ep) || ep.voice.status !== 'pending' || voiceJobs.has(ep.id)) return;
+    if (!synthesize || !valid(ep) || ep.voice.status !== 'pending' || voiceJobs.has(ep.id) || !wantVoice(ep)) return;
     if (offline()) { skipVoice(ep); return; }
     const controller = new AbortController();
     voiceJobs.set(ep.id, controller);

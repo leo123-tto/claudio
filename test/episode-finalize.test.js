@@ -384,3 +384,51 @@ test('点歌时大脑点名的歌先找、先放，不被发现池的歌挤出�
   assert.deepEqual(titles(ep), ['大哥', '至少还有你']);
   assert.deepEqual(resolved.slice(0, 3), ['大哥', '至少还有你', '喜帖街']);
 });
+
+test('口播引用的旧事：歌在放就记下来（事件日志只记 id），歌没放就摘掉那句话', async () => {
+  const { readEvents } = await import('../server/events.js');
+  const play = [song('老街'), song('晴天')];
+  const matched = {
+    id: 'n_0000000a', kind: 'song', text: '他循环老街，说那是大学那条路', quote: '老街我循环了四遍',
+    songs: [{ title: '老街' }], at: '2026-06-01T00:00:00.000Z', status: 'active', sensitive: 'normal',
+  };
+  const ep = await finalizeEpisode(
+    { ...plan(play), say: '你上次循环老街，说那是大学那条路，那就接着听。', memoryRef: matched.id },
+    { recommendation: { ...pianoRecommendation({}), mentionable: [matched] } },
+  );
+  assert.equal(ep.memoryRef?.id, matched.id);
+  assert.equal(ep.memoryRef?.quote, '老街我循环了四遍');
+  const cited = readEvents().filter((event) => event.type === 'memory_cited');
+  assert.equal(cited.length, 1);
+  assert.equal(cited[0].key, matched.id);
+  assert.equal(cited[0].value, undefined, '收听事件日志里不落记忆原文');
+
+  // 引用那条挂的歌没放成：引用作废，说出口的那句也要摘掉
+  const broken = { ...matched, id: 'n_0000000b', songs: [{ title: '十年', artist: '陈奕迅' }] };
+  const strippedEp = await finalizeEpisode(
+    { ...plan(play), say: '你上次循环老街，说那是大学那条路。今晚这首很轻。', memoryRef: broken.id },
+    { recommendation: { ...pianoRecommendation({}), mentionable: [broken] } },
+  );
+  assert.equal(strippedEp.memoryRef, undefined);
+  assert.doesNotMatch(strippedEp.say, /大学那条路/);
+  assert.match(strippedEp.say, /今晚这首很轻/);
+});
+
+test('点名歌手的歌都放不了：不拿发现池里别人的歌补，直说这位歌手的歌拿不到', async () => {
+  services.ncm.resolve = async (candidate) => {
+    resolved.push(candidate.title);
+    return candidate.artist === '甲歌手' ? { title: candidate.title, artist: candidate.artist, url: null, playable: false }
+      : { title: candidate.title, artist: candidate.artist, id: String(++serial), url: `https://m.126.net/${serial}`, playable: true };
+  };
+  const play = ['一', '二', '三'].map((t) => ({ title: `甲${t}`, artist: '甲歌手', discoveryType: 'explore' }));
+  const poolSongs = ['池一', '池二'].map((title) => ({ title, artist: '乙歌手', discoveryType: 'adjacent', score: 90 }));
+  const ep = await finalizeEpisode({ intent: 'recommend', say: '甲歌手的歌，先听《甲一》，再听《甲二》。', play },
+    { recommendation: { poolSongs, discoveryLane: 'popular' }, chat: true, userInput: '放首甲歌手的歌' });
+  assert.deepEqual(titles(ep), []);
+  assert.equal(ep.say, '甲歌手的歌这会儿拿不到，先接着听这首。');
+  assert.equal(resolved.some((t) => t.startsWith('池')), false);
+  // 没点名歌手（只说换一首）时，发现池照旧补位
+  const loose = await finalizeEpisode({ intent: 'recommend', say: '换一批。', play },
+    { recommendation: { poolSongs, discoveryLane: 'popular' }, chat: true, userInput: '换一首' });
+  assert.equal(titles(loose).length > 0, true);
+});

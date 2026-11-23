@@ -2,7 +2,7 @@
 // 界面（index.html / styles.css / ui.js / lyrics.js / window-mode.js）两版同一份；播放引擎两个：
 // 个人版 app.js（后台备节目、两路交叉淡入、口播、接力）、公用版 public.js（单个 <audio> 顺序放）。
 // 带 data-cap 的控件默认藏着，对应功能开着才露出来，没有的功能不会先闪一下。
-const VERSION = 40;
+const VERSION = 41;
 // 只有服务明确回 404（老的个人版服务，还没有这个接口）才按个人版全开。别的失败（隧道 502、超时、断网）
 // 不猜：停在启动画面，退避重试——猜错了会让公用版的朋友看到老板的设置和按钮。
 const PERSONAL = {
@@ -46,6 +46,11 @@ if (features.webFonts) {
 // 驾驶模式（两版共用，只管界面；三个大键转给播放引擎原来的按钮）
 if (features.drive) {
   import(`./drive.js?v=${VERSION}`).then(({ initDrive }) => initDrive({ features })).catch(() => {});
+}
+
+// 好友互荐（两版共用）：要在播放引擎之前装好，引擎换歌时发的 claudio:now 才接得到
+if (features.friends) {
+  await import(`./friends.js?v=${VERSION}`).then(({ initFriends }) => initFriends({ mode: cfg.mode })).catch(() => {});
 }
 
 if (cfg.mode === 'public') {
