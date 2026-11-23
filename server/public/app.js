@@ -15,6 +15,8 @@ import { oneSentence } from '../drive.js';
 import { readToneExtension } from '../tone.js';
 import { TALK_LEVELS, applyTalk, createTalkTracker, effectiveTalk, hourKeyOf, speakReasons, talkAck, talkFromText } from '../talk.js';
 import { appVersion } from '../version.js';
+import { chatWhen } from '../chat-mode.js';
+import { config } from '../config.js';
 import { KIND_LABEL, NOTE_KINDS, buildNote, mergeInferredNotes, patchNote, pickMentionable, validateMemoryRef } from '../notebook.js';
 
 const COOKIE = 'dj_dev';
@@ -346,7 +348,8 @@ export function createPublicApp({
 
   // 菜单里看设备数要准：先丢掉这台的核验缓存再核一次
   // 网页（web/，和个人版同一份）先问这个：公用版只露出配额、最近听过、账号这几样，播放引擎用 public.js
-  app.get('/api/mode', (req, res) => res.json({ mode: 'public', features: { quota: true, history: true, account: true, drive: true, notebook: true, ...(friends ? { friends: true } : {}) }, version: appVersion() }));
+  app.get('/api/mode', (req, res) => res.json({ mode: 'public', features: { quota: true, history: true, account: true, drive: true, notebook: true, ...(friends ? { friends: true } : {}), ...(config.chat.enabled ? { chatMode: true } : {}) },
+    chat: { bed: config.chat.bed, idleMs: config.chat.idleMs }, version: appVersion() }));
   if (friends) mountFriendRoutes(app, { auth, friends, recommend: recommendFriend, members, failLimiter, clientIp, words: friendWords, ownerName });
 
   app.get('/api/me', (req, res, next) => {
@@ -556,6 +559,7 @@ export function createPublicApp({
     const auto = !text;
     const drive = req.body?.drive === true; // 驾驶模式：DJ 只说一句
     const smooth = req.body?.smooth === true; // 这次打开网页卡过，降到 320k
+    const chatMode = !auto && req.body?.chatMode === true && config.chat.enabled; // 聊天模式（账号面板里的开关，默认开）
     const cookie = members.getCookie(m.id);
     // 「少说点」「今天别打扰我」这类话：记下口播频率，回一句确认；不打大脑、不扣次数、不记进对话
     const talkChange = auto ? null : talkFromText(text);
@@ -597,7 +601,7 @@ export function createPublicApp({
       let degraded = false;
       try {
         reply = await brain.ask({ text, auto, memory, bound: true, drive, hour: beijingHour(), tone, name: m.name,
-          extension: adultExtension(memory, drive), notes, relation });
+          extension: adultExtension(memory, drive), notes, relation, chatMode });
     } catch (error) {
         if (error?.queueFull) throw error;
         degraded = true;
@@ -621,8 +625,10 @@ export function createPublicApp({
       // 念的是带演出标记的原稿；驾驶模式一句、不带标记
       const voiceId = say && !degraded ? voice.request(m.id, drive ? say : (reply.sayTagged || say), { tone }) : '';
       if (say) talkerOf(m.id).markSpoken({ at: now(), tier: publicTone({ at: now() }).key, hourKey: hourKeyOf(now(), BEIJING) });
+      // 聊天模式里她自己推的歌（听众没开口要歌）：网页排在当前这首后面，回话现在就念
+      const when = picked.songs.length ? chatWhen({ chatMode, intent: reply.intent, userInput: text }) : null;
       res.json({ say, voice: voiceId, songs: withLiked(memory, picked.songs), notice: picked.notice, intent: reply.intent, remaining: quota.remaining, degraded,
-        ...(memoryRef ? { memoryRef } : {}) });
+        ...(memoryRef ? { memoryRef } : {}), ...(when ? { when } : {}) });
     } catch (error) { sendError(res, error); }
   });
 

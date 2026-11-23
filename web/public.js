@@ -279,13 +279,21 @@ async function ask(text = '') {
   $('moodInput').disabled = true;
   if (text) { chatStrip.add('user', text); showDj('…'); $('djSay').classList.add('typing'); }
   try {
-    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on'), smooth, ahead: Boolean(current) } });
+    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on'), smooth, ahead: Boolean(current),
+      ...(text && chatEnabled() ? { chatMode: true } : {}) } });
     if (typeof out.remaining === 'number') me.remaining = out.remaining;
     renderMe();
     if (out.needBind) { if (text) showStage(current ? 'lyric' : 'none'); return startQr(); }
     if (text && out.say) chatStrip.add('dj', out.say);
     setNotice(out.notice || '');
-    if (out.songs.length) {
+    if (text && out.songs.length && out.when === 'next' && current) {
+      // 聊天模式里她自己推的：排在这首后面，回话现在就念
+      retries = 0;
+      queue = [...out.songs, ...queue];
+      if (out.say) showDj(out.say, 8000);
+      speakReply(out);
+    } else if (out.songs.length) {
+      if (text && chatState.active) setBed(false); // 听众要的歌：念完按正常音量放
       retries = 0;
       if (out.voice || out.say) Object.assign(out.songs[0], { voice: out.voice || '', say: out.say || '',
         ...(out.memoryRef ? { memoryRef: out.memoryRef } : {}) });
@@ -296,7 +304,8 @@ async function ask(text = '') {
       queue = text ? out.songs : [...queue, ...out.songs];
       if (text || !current) { wantPlay = true; playNext(); }
     } else if (text) {
-      if (out.say) showDj(out.say, 8000, out.memoryRef || null);
+      if (out.say) { showDj(out.say, 8000, out.memoryRef || null); if (chatState.active) speakReply(out); }
+      else if (chatState.active && out.intent === 'chat' && !out.notice) { showStage(current ? 'lyric' : 'none'); nod(); }
       else {
         showStage(current ? 'lyric' : 'none');
         if (!out.notice) setNotice('这次没找到能放的歌，换个说法试试');
@@ -332,11 +341,118 @@ let loudness = 1;
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 document.body.classList.toggle('ios', IOS);
 function applyVolume() {
-  audio.volume = loudness * (IOS ? 1 : Number($('vol').value) / 100);
+  audio.volume = loudness * (IOS ? 1 : (Number($('vol').value) / 100) * bedLevel);
+  talk.volume = IOS ? 1 : Number($('vol').value) / 100;
 }
 function applyLoudness(gain) { loudness = loudnessVolume(gain); applyVolume(); }
 $('vol').value = Number(store.get('dj_vol') ?? 100);
 $('vol').addEventListener('input', () => { store.set('dj_vol', $('vol').value); applyVolume(); });
+
+// ---- 聊天模式（事项 24）----
+// 聊着天时歌压到 CHAT_BED，45 秒没人说话回到正常音量。回话另开一路 <audio> 念（电脑、安卓）；
+// iPhone 不让网页改音量、第二路也不一定让出声：念回话时先停歌，念完从原处接着放。
+const MODE_CFG = globalThis.claudioMode || {};
+const CHAT_MODE = Boolean(MODE_CFG.features?.chatMode);
+const CHAT_BED = Math.min(1, Math.max(0, Number(MODE_CFG.chat?.bed ?? 0.25)));
+const CHAT_IDLE_MS = Math.max(5000, Number(MODE_CFG.chat?.idleMs ?? 45000));
+const talk = new Audio();
+const chatState = { active: false, bed: false, timer: null };
+let bedLevel = 1, bedRamp = null;
+let speaking = false, replySeq = 0;
+let held = null, inlineUrl = '';
+function chatEnabled() { return CHAT_MODE && store.get('dj_chat') !== 'off'; }
+function paintChatSeg() {
+  for (const b of $('chatSeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (chatEnabled() ? 'on' : 'off')));
+}
+function paintChatMode() {
+  $('chatMode').classList.toggle('hidden', !chatState.active);
+  $('chatMode').classList.toggle('dim', !chatState.bed);
+  $('driveListen').classList.toggle('hidden', !chatState.active);
+}
+function rampBed(target) {
+  clearInterval(bedRamp);
+  const from = bedLevel, start = performance.now(), ms = target < from ? 1200 : 2000;
+  bedRamp = setInterval(() => {
+    const k = Math.min(1, (performance.now() - start) / ms);
+    bedLevel = from + (target - from) * k;
+    applyVolume();
+    if (k >= 1) clearInterval(bedRamp);
+  }, 40);
+}
+function setBed(on) {
+  chatState.bed = on;
+  clearTimeout(chatState.timer); chatState.timer = null;
+  if (on) {
+    chatState.timer = setTimeout(() => {
+      if (fetching || speaking) { setBed(true); return; } // 还在等她回话、她还在念
+      setBed(false);
+    }, CHAT_IDLE_MS);
+  }
+  rampBed(on ? CHAT_BED : 1);
+  paintChatMode();
+}
+function touchChat() { if (chatState.active) setBed(true); }
+function enterChat() {
+  if (!chatEnabled()) return;
+  if (!chatState.active) { chatState.active = true; chatStrip.setOpen(true); }
+  setBed(true);
+}
+function exitChat() {
+  setBed(false);
+  chatState.active = false;
+  replySeq += 1;
+  talk.pause();
+  if (mode === 'chatvoice') finishInline();
+  speaking = false;
+  paintChatMode();
+  chatStrip.setOpen(false);
+}
+function nod() {
+  const avatar = document.querySelector('.stage-head .avatar');
+  if (!avatar) return;
+  avatar.classList.remove('nod'); void avatar.offsetWidth; avatar.classList.add('nod');
+}
+// 回话的语音：老板那边 5090 空着才念（204 就只出字），最多等 20 秒；等的时候又说了一句，旧的就不念了
+async function speakReply(out) {
+  if (!out.voice) return;
+  const seq = ++replySeq;
+  const holder = { voice: out.voice };
+  await Promise.race([prefetchVoice(holder), new Promise((r) => setTimeout(r, 20_000))]);
+  if (!holder.voiceUrl) return;
+  if (seq !== replySeq || !chatState.active || mode === 'voice') { URL.revokeObjectURL(holder.voiceUrl); return; }
+  if (IOS) { speakInline(holder.voiceUrl); return; }
+  talk.pause();
+  talk.src = holder.voiceUrl;
+  speaking = true;
+  const done = () => { if (talk.src !== holder.voiceUrl) return; speaking = false; URL.revokeObjectURL(holder.voiceUrl); touchChat(); };
+  talk.onended = done; talk.onerror = done;
+  talk.play().catch(done);
+}
+// iPhone：同一个 <audio> 先念回话，念完把歌接回原处（直链支持跳转；跳不了就从头放这首）
+function speakInline(url) {
+  held = current && mode === 'song' ? { song: current, src: audio.currentSrc || audio.src, at: audio.currentTime, playing: !audio.paused } : null;
+  mode = 'chatvoice'; speaking = true; inlineUrl = url;
+  srcChangedAt = Date.now();
+  audio.src = url;
+  applyLoudness(null);
+  audio.play().catch(() => finishInline());
+}
+function finishInline() {
+  if (mode !== 'chatvoice') return;
+  mode = 'song'; speaking = false;
+  if (inlineUrl) URL.revokeObjectURL(inlineUrl);
+  inlineUrl = '';
+  const h = held; held = null;
+  touchChat();
+  if (!h || current !== h.song) return;
+  setSrc(h.src, h.at);
+  applyLoudness(h.song.gain);
+  showStage('lyric');
+  if (h.playing && wantPlay) audio.play().catch(() => {});
+}
+$('chatModeExit').addEventListener('click', (event) => { event.stopPropagation(); exitChat(); });
+$('driveListen').addEventListener('click', exitChat);
+$('moodInput').addEventListener('input', touchChat);
 
 // 口播：服务端给了 voice 就先在后台取成 blob（老板那边不闲会回 204，就没有）；轮到这首时取好了就先念、念完放歌，
 // 没取好就直接放歌，不等。
@@ -361,6 +477,7 @@ function resetProgress() {
 
 async function playNext() {
   clearTimeout(voiceTimer);
+  if (mode === 'chatvoice') { mode = 'song'; held = null; speaking = false; touchChat(); }
   if (current?.voiceUrl) URL.revokeObjectURL(current.voiceUrl);
   current = queue.shift() || null;
   if (!current) {
@@ -372,7 +489,7 @@ async function playNext() {
   resetProgress();
   renderFav();
   bindLyrics(current);
-  if (current.voiceUrl) {
+  if (current.voiceUrl && !speaking) {
     mode = 'voice';
     showDj(current.say || '', 0, current.memoryRef || null);
     audio.src = current.voiceUrl;
@@ -425,7 +542,7 @@ audio.addEventListener('playing', () => {
   }
 });
 audio.addEventListener('pause', () => setPlaying(false));
-audio.addEventListener('ended', () => (mode === 'voice' ? startSong() : playNext()));
+audio.addEventListener('ended', () => (mode === 'voice' ? startSong() : mode === 'chatvoice' ? finishInline() : playNext()));
 audio.addEventListener('timeupdate', () => {
   if (mode !== 'song') return;
   paintProgress({ fill: $('barFill'), cur: $('curTime'), dur: $('durTime') }, audio.currentTime, audio.duration);
@@ -445,6 +562,7 @@ function fallbacks(song) {
   return ladder;
 }
 audio.addEventListener('error', async () => {
+  if (mode === 'chatvoice') return finishInline();
   if (!current) return;
   if (mode === 'voice') return startSong();
   const song = current;
@@ -538,6 +656,7 @@ function send() {
   const text = $('moodInput').value.trim();
   if (!text) return;
   $('moodInput').value = '';
+  enterChat();
   ask(text);
 }
 $('sendBtn').addEventListener('click', send);
@@ -667,6 +786,16 @@ $('qualitySeg').addEventListener('click', async (event) => {
   stalls = 0;
   try { sessionStorage.removeItem('dj_smooth'); } catch { /* 无痕窗口 */ }
 });
+
+// 聊天模式开关：记在这台设备上，默认开
+$('chatSeg').addEventListener('click', (event) => {
+  const value = event.target.closest('button')?.dataset.value;
+  if (!value) return;
+  store.set('dj_chat', value);
+  if (value === 'off') exitChat();
+  paintChatSeg();
+});
+paintChatSeg();
 
 // 口播频率、本地语气扩展：选了就记在服务端（换设备也算）
 $('talkSeg').addEventListener('click', async (event) => {

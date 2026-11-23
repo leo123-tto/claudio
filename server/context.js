@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { styleConstraints } from './style-request.js';
+import { chatModeRules, recentTurnsText } from './chat-mode.js';
 import { config } from './config.js';
 import { recentPlays, recentMessages } from './state.js';
 import { summaryLine } from './weather.js';
@@ -165,7 +166,7 @@ function profileText(profile) {
   ].filter(Boolean).join('\n') || '（行为画像刚开始积累，先参考口味档案）';
 }
 
-export function buildPromptBundle({ userInput = '', mood = '', sleep = null, nowPlaying = null, briefSay = false, drive = false, excludeSongs = [], recentSays = [], now = new Date(), scene = currentScene(now), toneExtension = false, singleSong = false } = {}) {
+export function buildPromptBundle({ userInput = '', mood = '', sleep = null, nowPlaying = null, briefSay = false, drive = false, excludeSongs = [], recentSays = [], now = new Date(), scene = currentScene(now), toneExtension = false, singleSong = false, chatMode = false } = {}) {
   const settings = getSettings();
   const favoriteSongs = readFavorites();
   const actualRecent = recentListenedSongs(50);
@@ -305,7 +306,8 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
     brief.recentUserMessages.length ? '## 最近听众自己说过的话\n' + brief.recentUserMessages.map((line) => `- ${line}`).join('\n') : '',
     '## 本次最高优先级任务\n' + (userInput ? chatRules : automaticRules),
     userInput && hasPositiveStyle ? styleRules : '',
-    chat ? '本次是听众当面说话，要快：say 用 2 句、40 到 70 字（不算标记），别只回一句「好，放某某」；reason 15 字内；memoryCandidates 只在听众这次明确说了喜好时写，否则 []。' : '',
+    chat && !chatMode ? '本次是听众当面说话，要快：say 用 2 句、40 到 70 字（不算标记），别只回一句「好，放某某」；reason 15 字内；memoryCandidates 只在听众这次明确说了喜好时写，否则 []。' : '',
+    chat && chatMode ? 'reason 15 字内；memoryCandidates 只在听众这次明确说了自己的事或喜好时写，否则 []。' : '',
     briefSay ? '本次简短口播：推荐或聊天只说一句，30到45个字，不要第二句；控制确认仍在20字内。' : '',
     // 话多档：每首歌前都说，一段只放一首（覆盖上面「两首」「前两首」的说法）
     singleSong ? '本段只放一首歌：程序只播放 play 的第一首，其余只作不可播时的备选；say 只介绍这一首，不提第二首。把你最想放的那首排第一。' : '',
@@ -320,6 +322,9 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
     nowPlaying?.type === 'song'
       ? `## 正在播放\n《${nowPlaying.title}》— ${nowPlaying.artist}${[nowPlaying.year, nowPlaying.genre].filter(Boolean).length ? `（${[nowPlaying.year, nowPlaying.genre].filter(Boolean).join(' ')}）` : ''}。听众说“这首”就是指它；评价它时通常 play=[]。`
       : '',
+    // 聊天模式：最近几轮对话和聊天规则放最末（每轮都变，不影响前面的缓存前缀）
+    chat && chatMode && recentTurnsText(recentMessages(16)) ? '## 最近的对话（旧 → 新）\n' + recentTurnsText(recentMessages(16)) : '',
+    chat && chatMode ? chatModeRules({ drive }) : '',
     userInput ? '## 听众刚说\n' + userInput : '',
   ].filter(Boolean).join('\n\n');
 

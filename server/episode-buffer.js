@@ -288,6 +288,19 @@ export function createEpisodeBuffer({
   }
   return {
     ensure, idle, claim, release, start, invalidate, reviseSays, runForeground, retryVoices, exclusions, held,
+    // 聊天模式里 Vera 推的歌：插到最前面当下一期（当前这首放完再接）。口播已经在聊天里念过，这期不再念。
+    // 超出容量就把最后一期挤掉。
+    enqueueNext(ep) {
+      stamp(ep); episodes.set(ep.id, ep);
+      buffer.unshift(ep);
+      while (buffer.length > capacity) {
+        const dropped = buffer.pop();
+        episodes.delete(dropped.id); voiceJobs.get(dropped.id)?.abort();
+      }
+      notifyChange();
+      emit({ kind: 'nextReady', buffered: buffer.length, epoch });
+      return ep;
+    },
     adopt(ep, claimId) {
       stamp(ep); episodes.set(ep.id, ep);
       const entry = { at: now(), episode: ep, invalid: false, ready: Promise.resolve() };

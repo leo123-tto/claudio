@@ -12,7 +12,7 @@
     <meta name="apple-mobile-web-app-title" content="Claudio" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <script src="/theme.js"></script>
-    <link rel="stylesheet" href="/styles.css?v=16" />
+    <link rel="stylesheet" href="/styles.css?v=17" />
     <link rel="stylesheet" href="/friends.css?v=1" />
   </head>
   <body>
@@ -69,6 +69,7 @@
           <span class="live-tag" id="liveTag">OFFLINE</span>
         </div>
         <div class="lane-pill hidden" id="lanePill" data-state="starting"><i class="lane-dot"></i><span id="laneText"></span></div>
+        <div class="chat-mode hidden" id="chatMode"><span class="chat-mode-tag" id="chatModeTag"><i class="lane-dot"></i>在聊 · 歌在背景</span><button class="chat-mode-exit" id="chatModeExit" type="button">就听歌</button></div>
         <div class="top-actions">
           <span class="quota hidden" id="quotaTag" data-cap="quota"></span>
           <button class="icon-btn hidden" id="historyBtn" data-cap="history" type="button" aria-label="最近听过" title="最近听过"><svg class="ico"><use href="#i-history"/></svg></button>
@@ -156,6 +157,7 @@
       <section class="drive hidden" id="drive" aria-label="驾驶模式">
         <div class="drive-top">
           <button class="drive-exit" id="driveExit" type="button"><svg class="ico"><use href="#i-close"/></svg><span>退出驾驶</span></button>
+          <button class="drive-listen hidden" id="driveListen" type="button">就听歌</button>
           <span class="drive-quality chip quality hidden" id="driveQuality"></span>
         </div>
         <div class="drive-info">
@@ -316,6 +318,13 @@
               <button type="button" role="radio" data-value="minimal" aria-checked="false">几乎不说</button>
             </div>
           </section>
+          <section class="group hidden" id="chatGroup" data-cap="chatMode">
+            <h3>聊天模式</h3>
+            <div class="seg" id="chatSeg" role="radiogroup" aria-label="聊天模式">
+              <button type="button" role="radio" data-value="on" aria-checked="true">开</button>
+              <button type="button" role="radio" data-value="off" aria-checked="false">关</button>
+            </div>
+          </section>
           <section class="group hidden" id="adultGroup">
             <h3 id="adultTitle"></h3>
             <div class="seg" id="adultSeg" role="radiogroup" aria-label="开关">
@@ -413,6 +422,6 @@
       </section>
     </div>
 
-    <script src="/boot.js?v=8" type="module"></script>
+    <script src="/boot.js?v=9" type="module"></script>
   </body>
 </html>

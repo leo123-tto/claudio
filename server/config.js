@@ -153,6 +153,13 @@ export const config = {
     publicLevel: env.PUBLIC_TONE === 'mild' ? 'mild' : 'full',
   },
 
+  // 聊天模式（事项 24）：背景压到多少、多久没人说话恢复音量（网页经 /api/mode 拿到）。CHAT_MODE=0 关掉
+  chat: {
+    enabled: env.CHAT_MODE !== '0',
+    bed: Math.min(1, Math.max(0, Number(env.CHAT_BED_VOLUME ?? 0.25))),
+    idleMs: Math.max(5_000, Number(env.CHAT_IDLE_SEC ?? 45) * 1000),
+  },
+
   scheduler: {
     enabled: env.SCHEDULER_ENABLED === '1',
   },

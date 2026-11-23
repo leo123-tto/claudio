@@ -17,7 +17,7 @@ const el = {};
   'nowTitle', 'nowMeta', 'nowState', 'nowQuality',
   'prevBtn', 'playBtn', 'nextBtn', 'stopBtn', 'dislikeBtn', 'favBtn', 'vol',
   'curTime', 'durTime', 'bar', 'barFill', 'queueCount',
-  'liveTag', 'lanePill', 'laneText', 'connMsg', 'stream', 'nowPlaying', 'moodInput', 'voiceBtn', 'sleepBtn', 'sleepBadge', 'sendBtn', 'connState',
+  'liveTag', 'lanePill', 'laneText', 'chatMode', 'chatModeTag', 'chatModeExit', 'driveListen', 'connMsg', 'stream', 'nowPlaying', 'moodInput', 'voiceBtn', 'sleepBtn', 'sleepBadge', 'sendBtn', 'connState',
   'meter', 'bdA', 'bdB', 'chat', 'chatLog', 'chatToggle', 'memoryPanel', 'memoryText',
   'fullscreenBtn', 'airplayBtn',
   'settingsBtn', 'settingsBackdrop', 'settingsClose', 'settingsResult', 'saveSettingsBtn',
@@ -442,6 +442,16 @@ function showLane(state, message = '') {
 const MUSIC_LEAD = 6; // 口播结束前多少秒，下一首歌以背景音垫进来（老板要 5~6 秒）
 const BG_VOL = 0.13; // 口播/交互时音乐压到的背景音量（约 13%，让口播更突出）
 const SAY_GAIN = 1.25; // 口播增益：TTS 人声 RMS 比音乐低，用 GainNode 放大到 1.25x 提响（element.volume 上限 1.0 做不到）
+// 聊天模式（事项 24）：聊着天时歌压到 CHAT_BED，没人说话 CHAT_IDLE_MS 后回到正常音量。数从 /api/mode 来
+const MODE_CFG = globalThis.claudioMode || {};
+const CHAT_MODE = Boolean(MODE_CFG.features?.chatMode);
+const CHAT_BED = Math.min(1, Math.max(0, Number(MODE_CFG.chat?.bed ?? 0.25)));
+const CHAT_IDLE_MS = Math.max(5000, Number(MODE_CFG.chat?.idleMs ?? 45000));
+const chatState = { on: false, bed: false, timer: null };
+// iPhone / iPad 的 Safari 不让网页改 <audio> 的音量。直连输出（没接 WebAudio）时压低和交叉淡入都不生效，
+// 所以：念口播时先停歌、念完从原处接着放；换歌不重叠，上一首放完再接下一首（volumeFixed）。
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IOS_GAP_S = 0.3; // 上一首还剩这么多秒时接下一首（尾巴几乎是静音）
 const SLEEP_CHOICES = [15, 30, 45, 60, 90]; // 睡眠定时可选分钟
 const SLEEP_FADE_MS = 8000; // 到点淡出时长
 const SLEEP_KEY = 'claudio-sleep'; // 刷新后定时还在
@@ -490,6 +500,7 @@ const sourced = new WeakSet(); // 记录已建过 MediaElementSource 的轨：�
 const gains = new WeakMap();   // track → GainNode：音量走 gain。关键——Safari（WebKit）里音频一旦接入 WebAudio 图，element.volume 对输出无效，必须用 GainNode 控音量
 const volMap = new WeakMap();  // track → 意向音量 0~1：读音量的真源（element.volume 被 gain 接管后不再可靠）
 function trackVol(track) { return volMap.has(track) ? volMap.get(track) : track.volume; }
+function volumeFixed() { return IS_IOS && !gains.get(musicA); }
 function setTrackVol(track, v) {
   v = Math.max(0, v); // 允许 >1：GainNode 可放大（用于口播提响）；element.volume 回退路径下方再夹到 ≤1
   volMap.set(track, v);
@@ -598,7 +609,7 @@ const setPlayIcon = (p) => {
   el.playBtn.title = p ? '暂停' : '播放';
 };
 // 歌曲与口播各自的目标音量；直连输出时人声最终夹到 1。
-const songVol = () => masterVol;
+const songVol = () => (chatBedOn() ? CHAT_BED : 1) * masterVol;
 const sayVol = () => SAY_GAIN * masterVol;
 
 // 每次用户接管都在点击时换代，旧请求和延迟回调不能再改播放器。
@@ -771,6 +782,7 @@ function newGeneration({ preservePending = false, preserveMusic = false } = {}) 
   if (voiceContext && !voiceContext.holder?.started) releaseClaim(voiceContext.holder);
   sayOnEnd?.abort(); sayOnEnd = null;
   voiceContext = null; slots.delete(voice);
+  releaseHeldMusic({ resume: preserveMusic });
   const tail = musicFade?.old;
   envelopes.clear(); musicFade = null; crossing = false;
   for (const track of [musicA, musicB]) {
@@ -1120,7 +1132,7 @@ function onItemStart(item, i) {
 // 音量由真实经过时间计算，窗口恢复或媒体事件到来时立即补到当前值。
 function rampVolume(track, to, ms, done, targetRatio) {
   const from = trackVol(track);
-  const toRatio = targetRatio ?? (masterVol ? to / masterVol : (done ? 0 : track === voice ? SAY_GAIN : ducked ? BG_VOL : 1));
+  const toRatio = targetRatio ?? (masterVol ? to / masterVol : (done ? 0 : track === voice ? SAY_GAIN : musicLevel()));
   envelopes.set(track, { from, to, fromRatio: masterVol ? from / masterVol : 0, toRatio,
     start: performance.now(), duration: ms, done, gen: playbackGen });
   applyEnvelopes();
@@ -1140,7 +1152,7 @@ function applyEnvelopes() {
   if (fade && alive(fade.gen) && !paused) {
     const k = Math.max(0, Math.min(1, (now - fade.start) / fade.duration));
     const power = equalPower(k);
-    const level = (ducked ? BG_VOL : 1) * masterVol;
+    const level = musicTarget();
     setTrackVol(fade.old, fade.oldLevel * power.old * masterVol);
     setTrackVol(fade.next, level * power.new);
     if (k >= 1) {
@@ -1155,7 +1167,12 @@ document.addEventListener('visibilitychange', () => { applyEnvelopes(); if (!pau
 function cancelBlend() {
   musicFade = null; crossing = false;
 }
-function musicTarget() { return (ducked ? BG_VOL : 1) * masterVol; }
+// 音乐该在的音量（不含音量滑块）：念口播时压到 BG_VOL，聊天时 CHAT_BED，平常 1
+function musicLevel() {
+  const rest = chatBedOn() ? CHAT_BED : 1;
+  return ducked ? Math.min(BG_VOL, rest) : rest;
+}
+function musicTarget() { return musicLevel() * masterVol; }
 function soundingMusic() {
   if (exclusiveSink?.uid) return !exclusiveClock.paused || Boolean(exclusiveRequest);
   return [musicA, musicB].some((t) => t.src && !t.paused && !t.ended);
@@ -1225,7 +1242,7 @@ async function startMusic(item, i, { episode = activeEpisode, holder = null, bed
       }
     }
     const ms = duration ?? crossfadeDuration(oldMeta, item.meta);
-    if (old.src && !old.paused && !old.ended && !bed) {
+    if (old.src && !old.paused && !old.ended && !bed && !volumeFixed()) {
       musicFade = { old, next, start: performance.now(), duration: ms, gen, reason,
         oldLevel: masterVol ? trackVol(old) / masterVol : 1 };
       crossing = true;
@@ -1273,6 +1290,7 @@ function reportPlayFailure(item, track, error, extra = {}) {
   }).catch(() => {});
 }
 function startBlend(songItem, songIdx) {
+  if (volumeFixed()) return; // iPhone 压不低音量：新歌等口播念完再起，不垫在下面
   if (voiceContext?.bed || slots.get(idle)?.loading) return;
   const ctx = voiceContext;
   if (!ctx || ctx.bedLoading) return;
@@ -1319,6 +1337,12 @@ function onTimeUpdate() {
     if (first >= 0 && leadIn && !voiceContext.bed && !voiceContext.bedFailed) {
       startBlend(ep.queue[first], first);
     }
+    // iPhone 不垫歌：念的时候先把第一首加载好，念完马上能响（锁屏时空太久页面可能被挂起）
+    if (first >= 0 && volumeFixed() && !slots.get(idle)?.loading && slots.get(idle)?.item !== ep.queue[first]) {
+      idle.pause(); envelopes.delete(idle);
+      slots.set(idle, { item: ep.queue[first], prepared: true });
+      idle.src = proxyUrl(ep.queue[first].url); idle.load();
+    }
   }
   if (!item || active.ended || active.paused || voiceContext?.audible || musicFade) return;
   const remain = duration - currentTime;
@@ -1330,7 +1354,8 @@ function onTimeUpdate() {
       slots.set(idle, { item: queue[following], prepared: true });
       idle.src = proxyUrl(queue[following].url); idle.load();
     }
-    if (remain <= crossfadeDuration(item.meta, queue[following].meta) / 1000 && !slots.get(idle)?.loading) {
+    const span = volumeFixed() ? IOS_GAP_S : crossfadeDuration(item.meta, queue[following].meta) / 1000;
+    if (remain <= span && !slots.get(idle)?.loading) {
       startMusic(queue[following], following);
     }
   } else {
@@ -1471,6 +1496,7 @@ async function startSayOverlay(sayUrl, sayText, getEpisode, holder = null) {
           if (!alive(gen) || ctx !== voiceContext) return;
           if (paused) { voice.pause(); pausedWork.set('voicePlay', reveal); return; }
           ctx.audible = true; ctx.lastTime = voice.currentTime; ctx.progressAt = performance.now(); responseHeard = true;
+          holdMusicForVoice();
           markStarted(holder);
           if (pendingEpisode === holder) { pendingEpisode = null; claimId = null; }
           reportEar(earKind, 'voice');
@@ -1498,10 +1524,10 @@ function failVoice(ctx = voiceContext) {
     logChat('claudio', ep.say || ctx?.text);
   } else showControlReply(ctx?.text || '语音暂时离线，先听音乐');
   voiceContext = null; overlaying = false; ducked = false;
-  if (!ep) restoreAfterOverlay();
+  if (!ep) { releaseHeldMusic(); restoreAfterOverlay(); }
   disarmWatchdog();
   for (const music of [musicA, musicB]) if (!music.paused && !music.ended) rampVolume(music, songVol(), 1200);
-  setState('语音离线，先放歌');
+  setState(ep && !ep.say ? '正在播放' : '语音离线，先放歌');
   if (ep) gated('voiceFailed', () => finishAfterSay(ep, ctx));
 }
 
@@ -1585,6 +1611,7 @@ function finishAfterSay(ep, endedContext = voiceContext) {
     const holder = ctx?.holder;
     if (pendingEpisode === holder) { pendingEpisode = null; claimId = null; }
     ducked = false;
+    releaseHeldMusic({ resume: false });
     if (ctx?.bed) {
       const bed = ctx.bed, old = bed === musicA ? musicB : musicA;
       rampVolume(old, 0, 600, () => { old.pause(); closeSongSession(ctx.origin === 'chat' ? 'skip' : 'completed', old); });
@@ -1637,10 +1664,30 @@ function armWatchdog(ms = WATCHDOG_MS, force = false) {
   }, ms, { key: 'watchdog' });
 }
 function disarmWatchdog() { clearTimeout(watchdog); pendingTimers.delete(watchdog); watchdog = null; }
+// iPhone：口播出声时先停歌、记下来；念完（或念不成）从原处接着放。换了歌的就不接了。
+const heldForVoice = new Set();
+function holdMusicForVoice() {
+  if (!volumeFixed()) return;
+  if (musicFade) { musicFade.old.pause(); closeSongSession(musicFade.reason, musicFade.old); cancelBlend(); }
+  for (const music of [musicA, musicB]) {
+    if (music.paused || music.ended) continue;
+    envelopes.delete(music); music.pause(); heldForVoice.add(music);
+  }
+}
+function releaseHeldMusic({ resume = true } = {}) {
+  const tracks = [...heldForVoice]; heldForVoice.clear();
+  for (const music of tracks) {
+    if (!resume || music !== active || !music.src || music.ended || stopped) continue;
+    if (paused) { resumeTracks.add(music); resumeVolumes.set(music, songVol()); continue; }
+    setTrackVol(music, musicTarget());
+    music.play().catch(() => {});
+  }
+}
 function unduck() {
   cancelSubtitle();
   disarmWatchdog(); document.body.classList.remove('thinking');
   ducked = false; overlaying = false;
+  releaseHeldMusic();
   if (exclusiveSink?.uid) {
     const resume = queue[exclusiveResumeIdx];
     if (resume?.type === 'song') playIndex(exclusiveResumeIdx);
@@ -1688,6 +1735,14 @@ function memoryChip(ref) {
 function renderStream(ep) {
   clearStageView();
   el.stream.innerHTML = '';
+  // 角标跟着「这一期」走，不是跟着某次渲染走：换到歌曲舞台会重新渲染（只带 queue），
+  // 所以这里也认 activeEpisode 上的 memoryRef，否则角标一闪就没了。
+  // 带 id 的是新一期（它没引用就不该蹭上一期的角标）；只带 queue 的是同一期的重渲染。
+  const memoryRef = ep?.memoryRef || (ep?.id ? null : (activeEpisode?.memoryRef || null));
+  // 角标挂在第一首歌那一行：口播念完就只剩歌，挂在口播上会跟着一起消失、就点不到了。
+  // 没有歌（纯聊天回复）才挂回口播那一行。
+  let chipHost = null;
+  let firstSongHost = null;
   ep.queue.forEach((item, i) => {
     const div = document.createElement('div');
     div.className = 'line enter' + (item.type === 'song' ? ' song' : '');
@@ -1695,12 +1750,9 @@ function renderStream(ep) {
     div.style.animationDelay = `${Math.min(i, 6) * 60}ms`; // 错峰进场
     if (item.type === 'tts') {
       div.innerHTML = `<span class="who">Vera</span><div class="bubble">${escapeHtml(item.text)}</div>`;
-      // 这一期她提起了一件旧事：给个小角标，点开能看到原话和日期。
-      if (ep.memoryRef && !ep.__memoryChip) {
-        ep.__memoryChip = true;
-        div.appendChild(memoryChip(ep.memoryRef));
-      }
+      if (memoryRef && !chipHost) chipHost = div;
     } else {
+      if (memoryRef && !firstSongHost) firstSongHost = div;
       div.dataset.song = '1';
       div.innerHTML = `<span class="who">♪ ${escapeHtml(item.meta.title)} — ${escapeHtml(item.meta.artist)}</span><div class="lyric"></div>`;
     }
@@ -1708,6 +1760,9 @@ function renderStream(ep) {
     div.addEventListener('animationend', () => { div.classList.remove('enter'); div.style.animationDelay = ''; }, { once: true });
     el.stream.appendChild(div);
   });
+  // 每次渲染只挂一个角标
+  const host = firstSongHost || chipHost;
+  if (memoryRef && host) host.appendChild(memoryChip(memoryRef));
 }
 
 function highlightLine(i) {
@@ -1721,7 +1776,9 @@ function highlightLine(i) {
 
 // ── 请求一期 ──
 async function chat(input = '', mood = '') {
-  const gen = newGeneration({ preserveMusic: true });
+  // 聊天模式里一句接一句：已经领好的下一期（可能就是她刚推的歌）留着，不每句都退回去
+  const gen = newGeneration({ preserveMusic: true, preservePending: Boolean(input) && chatState.on });
+  if (pendingEpisode?.episode?.voice?.status === 'pending') pollPendingVoice();
   beginEar(input ? 'chat' : 'next'); initAudio();
   stopped = false; started = true;
   busy = true; lockUI(true); setState('思考中，音乐继续');
@@ -1735,7 +1792,7 @@ async function chat(input = '', mood = '') {
     // 服务端最多 150 秒规划 + 20 秒找歌，HTTP 留出 20 秒余量。
     const { data } = await requestJson('chat', '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input, mood, requestId, nowPlaying,
+      body: JSON.stringify({ input, mood, requestId, nowPlaying, ...(input && chatState.on ? { chatMode: true } : {}),
         sleep: sleepEnd ? { remainingMin: Math.max(1, Math.ceil((sleepEnd - Date.now()) / 60000)) } : null }),
     }, 190000);
     if (!alive(gen) || data.requestId !== currentRequestId) return;
@@ -1767,8 +1824,20 @@ function acceptChatResponse(data) {
       showControlReply(acted || data.control.action !== 'favorite' ? data.control.reply : '现在没有在放歌，没法记。');
     }
     document.body.classList.remove('thinking');
+    if (chatState.on) setChatBed(false); // 暂停、换歌、音量这类指令：照指令办，不再压着
     reportEar('control', 'done', { action: data.control.action, clear: true });
   } else if (data.ok && data.episode && acceptEpisode(data.episode)) {
+    // 点了歌（马上换）：歌是听众要的，念完按正常音量放；只是聊天就接着压在背景
+    if (data.episode.queue?.some((q) => q.type === 'song')) { if (chatState.on) setChatBed(false); } else touchChat();
+    if (data.episode.queued?.length) makeRoomForPicks();
+    if (!data.episode.say && !data.episode.queue?.some((q) => q.type === 'song')) {
+      // 聊天里她觉得不用回：不出字、不出声，头像点一下头
+      streamingActive = false; disarmWatchdog(); currentRequestId = null;
+      document.body.classList.remove('thinking');
+      nod(); setState(soundingMusic() ? '正在播放' : '');
+      reportEar(earKind, 'stay', { clear: true });
+      return;
+    }
     streamPending = data.episode;
     if (chatVoiceFailed || data.episode.voice?.status === 'skipped') {
       chatVoiceFailed = true; failVoice();
@@ -1787,6 +1856,68 @@ function acceptChatResponse(data) {
     failChat('这次没准备好，音乐继续');
   }
 }
+// 聊天模式里 Vera 自己推的歌：服务端已把它排成下一期。这一期后面没放的歌让出来，已经领好的下一期退回去，
+// 这首放完就接她推的。
+function makeRoomForPicks() {
+  if (pendingEpisode && !pendingEpisode.started) abandonPending();
+  const cut = queue.findIndex((q, n) => n > idx && q.type === 'song');
+  if (cut >= 0) queue.splice(cut);
+  requestNext();
+}
+function nod() {
+  const avatar = document.querySelector('.stage-head .avatar');
+  if (!avatar) return;
+  avatar.classList.remove('nod'); void avatar.offsetWidth; avatar.classList.add('nod');
+}
+
+// ── 聊天模式 ──
+function chatBedOn() { return CHAT_MODE && chatState.on && chatState.bed; }
+function paintChatMode() {
+  if (!el.chatMode) return;
+  el.chatMode.classList.toggle('hidden', !chatState.on);
+  el.chatMode.classList.toggle('dim', !chatBedOn());
+  el.driveListen?.classList.toggle('hidden', !chatState.on);
+}
+// 音量目标变了（压到背景 / 回正常）：正在放的那首慢慢过去；交叉淡入中途和口播压低时各自会读新的目标
+function applyMusicLevel(ms = 2000) {
+  if (overlaying || ducked || paused || stopped || musicFade) return;
+  if (!active.paused && !active.ended) rampVolume(active, musicTarget(), ms);
+}
+function setChatBed(on) {
+  const was = chatBedOn();
+  chatState.bed = on;
+  clearTimeout(chatState.timer); chatState.timer = null;
+  if (on) {
+    chatState.timer = setTimeout(() => {
+      // 在等她回话或她正在念：还在聊，接着等
+      if (busy || voiceContext || currentRequestId) { setChatBed(true); return; }
+      setChatBed(false);
+    }, CHAT_IDLE_MS);
+  }
+  if (was !== chatBedOn()) applyMusicLevel(on ? 1200 : 2000);
+  paintChatMode();
+}
+// 有人在说话（发话、按住说话、打字、她念完一句）：压到背景，重新数 45 秒
+function touchChat() { if (CHAT_MODE && chatState.on) setChatBed(true); }
+function enterChat() {
+  if (!CHAT_MODE) return;
+  if (!chatState.on) { chatState.on = true; chatStrip.setOpen(true); }
+  setChatBed(true);
+}
+function exitChat() {
+  setChatBed(false); // 先放开背景（还在聊天模式里才算得出音量变了），再退出
+  chatState.on = false;
+  paintChatMode();
+  chatStrip.setOpen(false);
+}
+el.chatModeExit?.addEventListener('click', (event) => { event.stopPropagation(); exitChat(); });
+el.driveListen?.addEventListener('click', exitChat);
+el.moodInput.addEventListener('input', touchChat);
+// 她回完话（没换歌）接着数 45 秒；自动节目的口播不算有人在聊
+voice.addEventListener('ended', () => {
+  if (voiceContext?.origin === 'chat' && !voiceContext.getEpisode()?.queue?.some((q) => q.type === 'song')) touchChat();
+});
+
 function startChatVoice(url, text) {
   if (!currentRequestId || chatVoiceFailed || chatVoiceUrl === url) return;
   chatVoiceUrl = url;
@@ -1905,13 +2036,15 @@ function maybeEnterPending(remain = 0) {
   }
   const tts = ep.queue?.find((q) => q.type === 'tts');
   if (ep.voice?.status === 'pending' && remain > 0) return;
-  if (tts && ep.voice?.status !== 'skipped' && (voice.readyState >= 3 || !slots.get(active)) && remain <= 8) {
+  // iPhone：口播一出声就停歌，所以快放完才开始念（念前有 SAY_LEAD_S 的空当），别截掉尾巴
+  const sayAt = volumeFixed() ? SAY_LEAD_S + IOS_GAP_S : 8;
+  if (tts && ep.voice?.status !== 'skipped' && (voice.readyState >= 3 || !slots.get(active)) && remain <= sayAt) {
     startSayOverlay(tts.url, tts.text || ep.say, () => ep, holder);
     return;
   }
   // 语音没有赶上尾声就放歌，迟到的 voiceReady 不再插入。
   const first = ep.queue?.findIndex((q) => q.type === 'song') ?? -1;
-  const span = crossfadeDuration(slots.get(active)?.item?.meta, ep.queue?.[first]?.meta) / 1000;
+  const span = volumeFixed() ? IOS_GAP_S : crossfadeDuration(slots.get(active)?.item?.meta, ep.queue?.[first]?.meta) / 1000;
   if (remain > span || (tts && ep.voice?.status !== 'skipped' && remain > 0)) return;
   pendingEpisode = null; claimId = null; clearTimeout(voicePoll);
   ep.voice = { status: 'skipped' };
@@ -2428,6 +2561,7 @@ function setupOutputMenu() {
 el.sendBtn.addEventListener('click', () => {
   const v = el.moodInput.value.trim(); if (!v) return; el.moodInput.value = '';
   logChat('user', v);
+  enterChat();
   chat(v);
 });
 let voiceRecorder = null;
@@ -2509,11 +2643,13 @@ async function toggleVoice() {
       }
       el.moodInput.value = '';
       logChat('user', data.text);
+      enterChat();
       chat(data.text);
     } catch {
       if (alive(recordingGen)) setState('没听清，再说一次');
     }
   });
+  enterChat();
   voiceRecorder.start();
   clearTimeout(voiceStopTimer);
   voiceStopTimer = setTimeout(() => {

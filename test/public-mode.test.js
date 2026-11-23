@@ -260,13 +260,14 @@ test('app：没设备 401；链接进门；链接只能用一次；无效链接�
   } finally { t.close(); }
 });
 
-test('app：网页先问 /api/mode，公用版只开配额、最近听过、账号、驾驶模式（没设备也能问）', async () => {
+test('app：网页先问 /api/mode，公用版只开配额、最近听过、账号、驾驶模式、聊天模式（没设备也能问）', async () => {
   const t = await startApp();
   try {
     const mode = await t.req('/api/mode');
     assert.equal(mode.status, 200);
     assert.equal(mode.data.mode, 'public');
-    assert.deepEqual(Object.keys(mode.data.features).sort(), ['account', 'drive', 'history', 'notebook', 'quota']);
+    assert.deepEqual(Object.keys(mode.data.features).sort(), ['account', 'chatMode', 'drive', 'history', 'notebook', 'quota']);
+    assert.deepEqual(mode.data.chat, { bed: 0.25, idleMs: 45000 });
     assert.equal(typeof mode.data.version, 'string');
     assert.ok(mode.data.version.length > 0);
   } finally { t.close(); }
@@ -303,6 +304,34 @@ test('app：额度用完提示；停用后立即失效并清 cookie', async () =
     assert.equal(gone.status, 401);
     assert.match(gone.setCookie, /Max-Age=0/);
   } finally { t.close(); }
+});
+
+test('app：聊天模式——每句都扣次数；她自己推的歌标 when=next（网页排到这首后面），听众要歌才马上换；提示词带聊天规则', async () => {
+  const t = await startApp();
+  try {
+    t.hub.addMember('mem_00000001');
+    const cookie = await t.join('mem_00000001');
+    t.members.setCookie('mem_00000001', 'MUSIC_U=a');
+    const chat = await t.req('/api/chat', { method: 'POST', body: { text: '今天有点累', chatMode: true }, cookie });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.data.when, 'next');
+    assert.equal(t.brainAsks.at(-1).chatMode, true);
+    assert.equal(chat.data.remaining, 2);
+    const asked = await t.req('/api/chat', { method: 'POST', body: { text: '换一首', chatMode: true }, cookie });
+    assert.equal(asked.data.when, 'now');
+    const off = await t.req('/api/chat', { method: 'POST', body: { text: '今天有点累' }, cookie });
+    assert.equal(off.data.when, undefined);
+    assert.equal(t.brainAsks.at(-1).chatMode, false);
+  } finally { t.close(); }
+});
+
+test('brain：聊天模式的提示词带规则，后台报幕和自动选歌不带', () => {
+  const persona = '你是 Vera。';
+  const base = { persona, memory: {}, bound: true, hour: 20 };
+  assert.match(buildPrompt({ ...base, text: '今天好累', chatMode: true }), /## 聊天模式[\s\S]*## 听众刚说/);
+  assert.doesNotMatch(buildPrompt({ ...base, text: '今天好累' }), /## 聊天模式/);
+  assert.doesNotMatch(buildPrompt({ ...base, auto: true, chatMode: true }), /## 聊天模式/);
+  assert.doesNotMatch(buildPrompt({ ...base, intro: { title: 'a', artist: 'b' }, chatMode: true }), /## 聊天模式/);
 });
 
 test('app：两个人的记忆互不可见；扫码绑定后只用自己的 cookie；解绑删 cookie', async () => {

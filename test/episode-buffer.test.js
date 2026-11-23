@@ -214,3 +214,20 @@ test('安静档：备好时先不合成；领取时定了不说就一直不合�
   assert.equal(texts.length,1);
   assert.equal(service.getVoice(said.id).status,'ready');
 });
+
+test('聊天里推的歌插到最前面当下一期：超出容量挤掉最后一期、领取时不念、作废时一起清掉', async (t) => {
+  const events=[];
+  const service=createEpisodeBuffer({build:async()=>ep(`bg-${Math.random()}`),emit:e=>events.push(e)});
+  t.after(()=>service.dispose()); service.ensure(); await settle();
+  assert.equal(service.snapshot().buffered,2);
+  service.enqueueNext({ id:'picks', say:'这首完了给你接', muted:true, voice:{status:'skipped'}, queue:[{type:'song',url:'https://music.126.net/p',meta:{id:'p',title:'推的歌',artist:'歌手'}}] });
+  assert.equal(service.snapshot().buffered,2);
+  assert.ok(events.some(e=>e.kind==='nextReady'));
+  assert.ok(service.exclusions().some(m=>m.title==='推的歌'));
+  const got=await service.claim('pick-claim');
+  assert.equal(got.id,'picks'); assert.equal(got.say,''); assert.equal(got.queue.some(i=>i.type==='tts'),false);
+  service.release('pick-claim');
+  service.enqueueNext({ id:'picks2', muted:true, voice:{status:'skipped'}, queue:[{type:'song',url:'https://music.126.net/q',meta:{id:'q',title:'又一首',artist:'歌手'}}] });
+  service.invalidate();
+  assert.equal(service.exclusions().some(m=>m.title==='又一首'),false);
+});

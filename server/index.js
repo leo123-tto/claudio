@@ -12,6 +12,7 @@ import { WebSocketServer } from 'ws';
 import { config } from './config.js';
 import { createEpisodeBuffer } from './episode-buffer.js';
 import { correctSay, spokenArtist } from './episode-coherence.js';
+import { chatWhen } from './chat-mode.js';
 import { styleConstraints, matchesStyle, matchesResolvedStyle } from './style-request.js';
 import { resolveEpisodeSongs, refreshEpisodeUrls } from './episode-audio.js';
 import { audioCache } from './audio-cache.js';
@@ -175,7 +176,7 @@ function commitEpisode(ep, userInput = '') {
   if (ep.say && !ep.muted) talkTracker.markSpoken(ep.speakStamp || talkStamp());
   else talkTracker.markPlayed();
   // 朋友推荐那期的报幕带着朋友的名字和附言：不记进对话（对话会进老板的提示词）
-  if (!ep.muted && !ep.friendRec) state.addMessage('claudio', ep.say);
+  if (!ep.muted && !ep.friendRec && ep.say) state.addMessage('claudio', ep.say);
   const recommendation = historyDetails.get(ep) || {};
   if (recommendation.fingerprint && ep.queue.some((item) => item.type === 'song')) {
     const playedLane = ep.queue.map((item) => item.meta?.lane).find((lane) => ['popular', 'fresh', 'classic'].includes(lane));
@@ -561,10 +562,24 @@ function takeEarlyResolve(song) {
   return Date.now() - hit.at <= 60000 ? hit.promise : null;
 }
 
-async function buildEpisodeStream({ userInput = '', mood = '', sleep = null, nowPlaying = null, signal, isCurrent, mark = () => {} }, send) {
+// 把一期推荐拆成两半：歌排成下一期（口播不再念，开声时也不再记一遍对话）；这一期只剩回话。
+// 原地改这一期：口播还在合成的话，合成好后照样挂到它上面。
+function queueChatPicks(ep) {
+  const songs = ep.queue.filter((item) => item.type === 'song');
+  if (!songs.length) return ep;
+  const picks = { ...ep, id: randomUUID(), queue: songs, voice: { status: 'skipped' }, sayTts: '', muted: true, chatQueued: true };
+  if (historyDetails.has(ep)) historyDetails.set(picks, historyDetails.get(ep));
+  episodeBuffer.enqueueNext(picks);
+  ep.intent = 'chat';
+  ep.queue = ep.queue.filter((item) => item.type !== 'song');
+  ep.queued = songs.map((item) => ({ title: item.meta?.title || '', artist: item.meta?.artist || '' }));
+  return ep;
+}
+
+async function buildEpisodeStream({ userInput = '', mood = '', sleep = null, nowPlaying = null, signal, isCurrent, mark = () => {}, chatMode = false }, send) {
   const isValid = () => isCurrent() && !signal.aborted;
   const drive = driveState.on();
-  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, drive, toneExtension: toneExtensionOn(),
+  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, drive, chatMode, toneExtension: toneExtensionOn(),
     excludeSongs: episodeBuffer.exclusions(), recentSays: ownSays() });
   const { tone } = bundle;
   // 大脑写的 say 带演出标记：页面和记录用去掉标记的（驾驶模式再截成一句），语音用带标记、带时段语气的
@@ -739,6 +754,7 @@ app.post('/api/chat', async (req, res) => {
   res.once('close', () => { if (!res.writableEnded) chat.controller.abort(); });
   try {
     const { input = '', mood = '', sleep = null, nowPlaying = null } = req.body ?? {};
+    const chatMode = req.body?.chatMode === true && config.chat.enabled;
     const { userInput, control } = route(input);
     // 「少说点」「今天别打扰我」：记下口播频率，回一句确认。不打大脑；话多档进出时备好的节目是一首一段 / 两首一段，作废重备
     const talkChange = !control && !mood && !sleep ? talkFromText(userInput) : null;
@@ -792,8 +808,10 @@ app.post('/api/chat', async (req, res) => {
         state.addMessage('user', userInput); state.addMessage('claudio', text);
         return { ok: true, control: { ...control, reply: text }, streamed: false };
       }
-      const ep = await buildEpisodeStream({ userInput, mood, sleep, nowPlaying, signal, isCurrent, mark }, send);
+      const built = await buildEpisodeStream({ userInput, mood, sleep, nowPlaying, signal, isCurrent, mark, chatMode }, send);
       signal.throwIfAborted();
+      // 聊天模式里 Vera 自己推的歌（听众没开口要歌）：歌排成下一期，这次只回话、不打断当前这首
+      const ep = chatWhen({ chatMode, intent: built.intent, userInput }) === 'next' ? queueChatPicks(built) : built;
       // 聊天只记对话；有新歌时才替换正在播放的音乐节目。
       if (ep.queue.some((item) => item.type === 'song')) {
         currentEpisode = ep;
@@ -1416,7 +1434,8 @@ app.post('/api/outputs', async (req, res) => {
 // 网页（web/，两版同一份）先问这个，决定露出哪些控件、加载哪个播放引擎（web/boot.js）
 app.get('/api/mode', (_req, res) => res.json({
   mode: 'personal',
-  features: { settings: true, dislike: true, prev: true, stop: true, outputs: true, sleep: true, voice: true, meter: true, webFonts: true, drive: true, driveSync: true, notebook: true, ...(friendsLink ? { friends: true } : {}) },
+  features: { settings: true, dislike: true, prev: true, stop: true, outputs: true, sleep: true, voice: true, meter: true, webFonts: true, drive: true, driveSync: true, notebook: true, ...(friendsLink ? { friends: true } : {}), ...(config.chat.enabled ? { chatMode: true } : {}) },
+  chat: { bed: config.chat.bed, idleMs: config.chat.idleMs },
   version: appVersion(),
 }));
 app.get('/api/status', (_req, res) => res.json({

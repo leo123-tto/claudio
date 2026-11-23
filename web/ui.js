@@ -87,7 +87,8 @@ export function createChatStrip({ chat, log, toggle, onChange = () => {} }) {
   const isOpen = () => chat.classList.contains('open');
   log.addEventListener('click', () => { if (!isOpen()) setOpen(true); });
   toggle.addEventListener('click', () => setOpen(!isOpen()));
-  document.addEventListener('click', (event) => { if (!chat.contains(event.target)) setOpen(false); });
+  // 点输入栏（发送、说话）不收起：聊天时对话条要开着
+  document.addEventListener('click', (event) => { if (!chat.contains(event.target) && !event.target.closest?.('.composer')) setOpen(false); });
   return { add, setOpen, isOpen };
 }
 

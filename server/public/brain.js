@@ -14,6 +14,7 @@ import { callLocalRaw, buildLocalBody } from '../llm/local.js';
 import { extractJson } from '../llm/normalize.js';
 import { backgroundText, mentionableText } from '../notebook.js';
 import { maxStage, relationText, stageFromPlays } from '../familiarity.js';
+import { chatModeRules } from '../chat-mode.js';
 
 export class BrainBusyError extends Error {
   constructor(message = 'DJ 这会儿有点忙') {
@@ -82,7 +83,7 @@ export const friendName = (name) => String(name || '').replace(/[#<>`{}[\]]+/g, 
 // name：hub 里 ta 的名字；extension：这位朋友自己打开了本地语气扩展才传 readToneExtension() 的结果（驾驶模式永远不用）。
 // intro：{title, artist} 给已经选好的这首写开场口播（后台报幕），不选歌、不聊天
 // notes：这次允许她挑的可提往事（已经滤过敏感 / 别再提 / 没挂歌的）；relation：{stage}
-export function buildPrompt({ persona, text, auto, memory, bound, hour, drive = false, tone = null, intro = null, name = '', extension = null, at = Date.now(), notes = [], relation = null }) {
+export function buildPrompt({ persona, text, auto, memory, bound, hour, drive = false, tone = null, intro = null, name = '', extension = null, at = Date.now(), notes = [], relation = null, chatMode = false }) {
   const theTone = tone || publicTone({ at, hour, drive });
   const mode = personaMode({ toneKey: theTone.key, now: beijingClock(at, hour), text: intro ? '' : text });
   const who = friendName(name);
@@ -120,6 +121,7 @@ export function buildPrompt({ persona, text, auto, memory, bound, hour, drive = 
       lines.push(`这首是听众的朋友「${from}」推荐给听众的。第一句必须是「${from}给你推荐了《${String(intro.title || '').slice(0, 80)}》」，后面最多再说一句为什么此刻放它正好；别替${from}编理由，也别说${from}的事。`);
     }
   } else {
+    if (chatMode && !auto) lines.push('', chatModeRules({ drive }));
     lines.push('', '## 听众刚说', auto ? '（没说话，上一段放完了，接着放两首）' : String(text).slice(0, 200));
   }
   return lines.join('\n');

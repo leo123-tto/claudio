@@ -96,6 +96,7 @@ claudio/
 │  ├─ drive.js               # 驾驶模式：口播只说一句（DRIVE_PROMPT + oneSentence）；个人版的开关状态 2 小时自动失效
 │  ├─ tone.js                # 口播语气档：清晨 / 上班 / 午休 / 白天 / 傍晚 / 夜晚 / 深夜 / 驾驶，钟点分界 TONE_*；每档的写法、导演提示、放行哪些标记；数据目录 user/tone-extension.md 可按档追加本地要求（设置里有开关）
 │  ├─ persona.js             # DJ 人格 Vera：核心 prompts/vera.md 两版共用；个人版可追加数据目录 user/persona.md（不进仓库）；按时段切老友 / 守夜人 / 策展人，睡前最后一段用结束语
+│  ├─ chat-mode.js          # 聊天模式（两版共用）：要不要马上换歌、最近几轮对话、聊天规则（放提示词末尾）
 │  ├─ talk.js                # 口播频率：话多 / 适中 / 安静 / 几乎不说；听懂「少说点」「今天别打扰我」；按开头 / 道别 / 换主题 / 整点 / 换时段定这一段说不说。当面说话的回复永远开口
 │  ├─ audio-quality.js       # 实际音质 {format, bitrate, sampleRate, bits}：网易云 song_url 的 type/br/sr，FLAC 读 64 字节文件头补位深；拿不到的不带
 │  ├─ version.js             # /api/mode 的 version：git 短号 → 部署前写的 server/version.json → package 版本 + 构建时间
@@ -238,7 +239,7 @@ MVP 4 条 → 全功能 6 条：
 
 | 方法 | 路径 | 说明 | 状态 |
 |---|---|---|---|
-| POST | `/api/chat` | 触发一期生成 / 用户输入（带 nowPlaying） | ✅ |
+| POST | `/api/chat` | 触发一期生成 / 用户输入（带 nowPlaying）。`chatMode:true` = 聊天模式：多轮对话 + 聊天规则；DJ 自己推的歌插成下一期，回话带 `queued`（公用版回 `when`） | ✅ |
 | GET | `/api/now` | 当前在放什么 | ✅ |
 | GET | `/api/next?claimId=` | 领取下一期（后台备好的节目）；没备好回 202，备好后 WS 推 `nextReady` | ✅ |
 | POST | `/api/episode/started` | `{id, claimId}`：节目真正开声才算数，记播放和推荐 | ✅ |
@@ -262,7 +263,7 @@ MVP 4 条 → 全功能 6 条：
 | GET | `/api/weather` | 当前天气 | ✅ |
 | GET | `/api/fish-credit` | Fish 余额（key 只在后端） | ✅ |
 | POST | `/api/settings/test-pc5090-tts` | 5090 语音试听（设置页「试听」），冷启动要等约 2 分钟 | ✅ |
-| GET | `/api/mode` | 网页先问这个：`{mode:'personal', features, version}`，决定露出哪些控件、加载哪个播放引擎（公用版回 `public`）；`version` 在设置 / 账号面板角落显示 | ✅ |
+| GET | `/api/mode` | 网页先问这个：`{mode:'personal', features, chat:{bed, idleMs}, version}`，决定露出哪些控件、加载哪个播放引擎（公用版回 `public`）；`version` 在设置 / 账号面板角落显示 | ✅ |
 | GET | `/api/status` | 健康检查 + 节目缓冲（`buffered` / `epoch` / `generating`）。`tts.model` 在 5090 时是音色名，在 Fish 时是模型名 | ✅ |
 | GET | `/api/outputs` | 播放设备菜单 | ✅ |
 | POST | `/api/outputs` | 切换播放设备 | ✅ |

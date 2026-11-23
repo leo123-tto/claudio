@@ -70,7 +70,7 @@ export function createMemberStore({ root, vaultKey, now = () => Date.now() }) {
       prefs: (mem.prefs || []).slice(-20),
       recent: (mem.recent || []).slice(-40),
       history: (mem.history || []).slice(0, HISTORY_MAX),
-      turns: (mem.turns || []).slice(-6),
+      turns: (mem.turns || []).slice(-16), // 聊天模式要接着聊：最近 8 轮
       notes: (mem.notes || []).slice(-400),
       lastActive: now(),
     };
