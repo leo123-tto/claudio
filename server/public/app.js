@@ -240,7 +240,7 @@ export function createPublicApp({
       maxDevices: m.max_devices,
       expires: m.expires,
       bound: members.bound(m.id),
-      // 没绑定也能点歌（借老板网易云，见 ncm-public.js 的 owner）；网页据此决定提示「绑定后才能点歌」还是直接让点
+      // 没绑定也能点歌（用运营者配置的默认音源，见 ncm-public.js 的 owner）；网页据此决定提示「绑定后才能点歌」还是直接让点
       canAsk: members.bound(m.id) || Boolean(ncm.borrowsOwner),
       nickname: mem.account?.nickname || '',
       vip: Boolean(mem.account?.vip),
@@ -373,7 +373,7 @@ export function createPublicApp({
     const text = String(req.body?.text || '').trim().slice(0, 200);
     const auto = !text;
     const cookie = members.getCookie(m.id);
-    // 盒子出口匿名搜索一律 405，会连累老板那边：借不到老板网易云（没配 NCM_SHARED_URL）时，没绑定的不开放点歌，也不扣次数
+    // 盒子出口匿名搜索一律 405，会连累主实例：没有默认音源（没配 NCM_SHARED_URL）时，没绑定的不开放点歌，也不扣次数
     if (!auto && !cookie && !ncm.borrowsOwner) {
       return res.json({ say: '', songs: [], notice: '绑定网易云后才能点歌（右上角菜单里扫码）。不绑定也能按播放，听榜单里的免费歌。', intent: 'chat', remaining: null, needBind: true });
     }

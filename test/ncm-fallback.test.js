@@ -1,4 +1,4 @@
-// 网易云拿不到时回落备用音源（个人版 resolve），以及公用版经 8099 借老板网易云：只搜、只取链接、不写回。
+// 网易云拿不到时回落备用音源（个人版 resolve），以及公用版未绑定时经 8099 用默认音源：只搜、只取链接、不写回。
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -97,7 +97,7 @@ test('没有插件：照旧报放不了 / 限流，不多发任何请求', async
   assert.equal(ncm.sources.isAltId('fk3'), false);
 });
 
-test('公用版借老板网易云（经 8099）：只发搜索和取链接，带老板 cookie 但不回给对方；放不了就找备用音源；本机不落任何文件', async () => {
+test('公用版默认音源（经 8099）：只发搜索和取链接，带主实例 cookie 但不回给对方；放不了就找备用音源；本机不落任何文件', async () => {
   reset();
   const before = fs.readdirSync(fixture, { recursive: true });
   const server = ncm.startSharedLimitServer('127.0.0.1:0');

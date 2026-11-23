@@ -3,7 +3,7 @@
 //
 // 必填环境变量：PUBLIC_HUB_BASE、PUBLIC_HUB_KEY（claudio-invite scope）、PUBLIC_VAULT_KEY、CLAUDIO_DATA_DIR
 // 可选：PORT(8091) HOST(127.0.0.1) NCM_BASE NCM_SHARED_URL（老板实例的搜索名额服务，盒子上是 http://127.0.0.1:8099）PUBLIC_LLM_BASE PUBLIC_LLM_MODEL PUBLIC_ENGINE_METRICS
-//      PUBLIC_BORROW_OWNER（0 = 没绑定的人不借老板网易云）PUBLIC_MAX_LISTENERS PUBLIC_FREE_CHART（没绑定的人放哪个榜单里的免费歌，默认热歌榜）PUBLIC_COOKIE_SECURE PUBLIC_APPLY_ORIGINS PUBLIC_TURNSTILE_SECRET(_FILE) PUBLIC_TURNSTILE_SITEKEY PUBLIC_TTS（0 = 不念口播）
+//      PUBLIC_BORROW_OWNER（0 = 未绑定时不用运营者配置的默认音源）PUBLIC_MAX_LISTENERS PUBLIC_FREE_CHART（没绑定的人放哪个榜单里的免费歌，默认热歌榜）PUBLIC_COOKIE_SECURE PUBLIC_APPLY_ORIGINS PUBLIC_TURNSTILE_SECRET(_FILE) PUBLIC_TURNSTILE_SITEKEY PUBLIC_TTS（0 = 不念口播）
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -48,7 +48,7 @@ const members = createMemberStore({
   root: path.join(path.resolve(env.CLAUDIO_DATA_DIR), 'members'),
   vaultKey: parseVaultKey(env.PUBLIC_VAULT_KEY),
 });
-// 没绑定网易云的人经老板实例借老板的网易云取链接（老板的 cookie 不进这个进程）；PUBLIC_BORROW_OWNER=0 关掉
+// 未绑定网易云时用运营者配置的默认音源（经主实例取链接，主实例的 cookie 不进这个进程）；PUBLIC_BORROW_OWNER=0 关掉
 const owner = env.NCM_SHARED_URL && env.PUBLIC_BORROW_OWNER !== '0' ? createOwnerChannel(env.NCM_SHARED_URL) : null;
 const ncm = createNcmClient({ base: env.NCM_BASE || 'http://127.0.0.1:3011', sharedUrl: env.NCM_SHARED_URL || '', owner });
 const brain = createBrain({

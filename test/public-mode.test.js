@@ -720,7 +720,7 @@ test('自动接着放选歌期间记下的最近听过不会被旧快照冲掉',
   } finally { t.close(); }
 });
 
-// ---- 没绑定的人借老板网易云（经老板实例 8099）、网易云放不了时回落备用音源 ----
+// ---- 没绑定的人用默认音源（经主实例 8099）、网易云放不了时回落备用音源 ----
 function fakeOwner() {
   const calls = [];
   return {
@@ -732,7 +732,7 @@ function fakeOwner() {
   };
 }
 
-test('借老板网易云：没绑定的人经老板实例搜和取链接（VIP 也放整曲）；本进程不发带 cookie 的请求', async () => {
+test('默认音源：没绑定的人经主实例搜和取链接（VIP 也放整曲）；本进程不发带 cookie 的请求', async () => {
   const fetched = [];
   const owner = fakeOwner();
   const ncm = createNcmClient({ base: 'http://ncm.local', owner, fetchFn: async (url, o) => { fetched.push([String(url), o.headers]); return jsonRes({}); } });
@@ -750,7 +750,7 @@ test('借老板网易云：没绑定的人经老板实例搜和取链接（VIP �
   assert.deepEqual(owner.calls, ['url:186016:exhigh:晴天']);
 });
 
-test('借老板网易云：老板那边搜索排队 / 冷却时整首用备用音源的（id 带前缀，没封面）；歌词也经老板实例取', async () => {
+test('默认音源：主实例搜索排队 / 冷却时整首用备用音源的（id 带前缀，没封面）；歌词也经主实例取', async () => {
   const owner = fakeOwner();
   owner.search = async () => { throw Object.assign(new Error('排队中'), { code: 'NCM_BUSY' }); };
   const ncm = createNcmClient({ base: 'http://ncm.local', owner, fetchFn: async () => jsonRes({}) });
@@ -762,7 +762,7 @@ test('借老板网易云：老板那边搜索排队 / 冷却时整首用备用�
   await assert.rejects(ncm.search('别的', { memberId: 'm1' }), NcmBusyError);
 });
 
-test('绑定的人：用自己的登录态；只有试听时经老板实例找备用音源（不借老板网易云）', async () => {
+test('绑定的人：用自己的登录态；只有试听时经主实例找备用音源（不用默认音源）', async () => {
   const owner = fakeOwner();
   const ncm = createNcmClient({
     base: 'http://ncm.local', owner,
@@ -779,7 +779,7 @@ test('绑定的人：用自己的登录态；只有试听时经老板实例找�
   assert.deepEqual(owner.calls, ['find:186016:晴天']);
 });
 
-test('借老板网易云：自己点太快（按人限速）时不去备用音源绕过', async () => {
+test('默认音源：自己点太快（按人限速）时不去备用音源绕过', async () => {
   const owner = fakeOwner();
   const ncm = createNcmClient({ base: 'http://ncm.local', owner, memberBurst: 1, memberRate: 0.001, waitMs: 0, fetchFn: async () => jsonRes({}) });
   await ncm.resolve({ title: '晴天', artist: '周杰伦' }, { memberId: 'm9', level: 'exhigh' }).catch(() => {});
@@ -788,13 +788,13 @@ test('借老板网易云：自己点太快（按人限速）时不去备用音�
   assert.ok(!owner.calls.some((c) => c.startsWith('find:')));
 });
 
-test('不借老板（没配 NCM_SHARED_URL）：照旧没绑定不能搜', async () => {
+test('没有默认音源（没配 NCM_SHARED_URL）：照旧没绑定不能搜', async () => {
   const ncm = createNcmClient({ base: 'http://ncm.local', fetchFn: async () => jsonRes({}) });
   assert.equal(ncm.borrowsOwner, false);
   await assert.rejects(ncm.search('晴天', {}), /绑定网易云后才能点歌/);
 });
 
-test('app：能借老板网易云时没绑定也能点歌；备用音源的歌能放、能记最近听过，红心只记本地不碰网易云', async () => {
+test('app：有默认音源时没绑定也能点歌；备用音源的歌能放、能记最近听过，红心只记本地不碰网易云', async () => {
   const t = await startApp({ ncm: {
     borrowsOwner: true,
     resolve: async (c, o) => (t.ncmCalls.push(`resolve:${o.cookie || ''}`), { id: 'fk3', title: c.title, artist: c.artist, url: 'https://a.cdn.example.org/3.mp3', level: 'exhigh', bitrate: 320000, playable: true }),

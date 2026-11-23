@@ -16,7 +16,7 @@ function parseAddress(value) {
 // grant(kind) → { ok } | { ok:false, retryMs } | { ok:false, coolingMs }；cool(ms) 记下别的实例碰到的 405。
 // tts(text) → mp3 Buffer | null：公用版要一句短口播（≤25 字），老板这边不闲就 null，回 409 让它跳过。
 export const GUEST_TTS_MAX = 25;
-// guest：公用版借老板网易云取链接（{ search, songUrl, find, lyric }，见 ncm.js 的 guest* 函数）。
+// guest：公用版未绑定账号时经主实例取歌（{ search, songUrl, find, lyric }，见 ncm.js 的 guest* 函数）。
 // 只搜、只取链接；老板的 cookie 不出老板实例，回给公用版的只有歌的信息和直链。
 const SONG_ID = /^(\d{1,15}|[a-z]{2,4}\d{1,20})$/;
 const LEVELS = new Set(['standard', 'higher', 'exhigh', 'lossless', 'hires']);
@@ -130,7 +130,7 @@ export function reportCooldown(url, ms) {
   post(url, '/cooldown', { ms }).catch((error) => unreachable(error));
 }
 
-// 公用版这边：经老板实例借网易云登录态 / 找备用音源。服务不通或老板那边忙都抛 code=NCM_BUSY，调用方当「排队中」处理。
+// 公用版这边：未绑定账号时经主实例搜歌、取地址 / 问音源插件。服务不通或主实例忙都抛 code=NCM_BUSY，调用方当「排队中」处理。
 export function createOwnerChannel(url, { fetchFn = fetch } = {}) {
   async function ask(path, body, timeout, signal) {
     const timed = AbortSignal.timeout(timeout);

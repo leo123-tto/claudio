@@ -437,7 +437,7 @@ async function altSong({ title, artist }, level, options) {
   }
 }
 
-// ---- 公用版借老板的网易云（只经本机 8099 名额服务调用，见 ncm-shared.js）----
+// ---- 公用版未绑定账号时的默认音源（只经本机 8099 名额服务调用，见 ncm-shared.js）----
 // 只取链接、只搜：不调 resolve()（它会记年份曲风），不碰播放记录、收藏、记忆和音频缓存，cookie 不出这个进程。
 // 搜索名额按「别的实例」算：老板有搜索在排队时不给，最多用到 searchPerMin − sharedReserve。
 

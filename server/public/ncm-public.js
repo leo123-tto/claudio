@@ -8,7 +8,7 @@
 //   （NCM_SHARED_URL，见 ../ncm-shared.js）要 kind=chat 的名额，老板优先；搜索碰到 405 就报给它，两边一起冷却 15 分钟。
 //   不管名额服务给多少，公用版自己每分钟最多 3 个；名额服务不通（老板实例重启等）时更保守：每分钟最多 2 个、间隔至少 5 秒。
 // - 匿名或非会员拿到的 VIP 歌只有 30–45 秒试听（freeTrialInfo），这里标成 trial，由上层决定跳过。
-// - owner（可选，见 ../ncm-shared.js 的 createOwnerChannel）：经老板实例的 8099 借老板的网易云。
+// - owner（可选，见 ../ncm-shared.js 的 createOwnerChannel）：未绑定时用运营者配置的默认音源（经主实例的 8099）。
 //   没绑定的人搜歌、取链接都走它（老板的 cookie 不进这个进程）；谁的网易云都放不了时，它再去备用音源找同一首。
 //   网易云没搜到的歌整首用备用音源的，id 是「字母前缀 + 数字」，没有封面，红心只记在这里。
 import crypto from 'node:crypto';
@@ -332,7 +332,7 @@ export function createNcmClient({
     const hit = chartCache.get(id);
     if (hit && hit.until > now()) return hit.songs;
     const data = await call('/playlist/track/all', { id, limit: 200, offset: 0 }, { ...options, cookie: '' });
-    // 能借老板网易云时榜单里的歌都能放；不能借时只留免费歌（fee 0 / 8）
+    // 有默认音源时榜单里的歌都能放；没有时只留免费歌（fee 0 / 8）
     const songs = (data?.songs ?? [])
       .filter((s) => owner || [0, 8].includes(Number(s.fee)))
       .map(trackView)

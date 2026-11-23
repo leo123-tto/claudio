@@ -48,7 +48,7 @@ function renderMe() {
   $('ncmBtn').textContent = me.bound ? '解绑' : '扫码绑定';
   $('devState').textContent = `${me.devices} / ${me.maxDevices}`;
   $('pairBtn').disabled = me.devices >= me.maxDevices;
-  // 能不能点歌看 canAsk（绑了，或者能借老板的网易云）；老服务没这个字段时退回看 bound
+  // 能不能点歌看 canAsk（绑了，或者有运营者配置的默认音源）；老服务没这个字段时退回看 bound
   const canAsk = me.canAsk ?? me.bound;
   $('moodInput').placeholder = canAsk ? '想听点什么' : '绑定网易云后可以点歌';
   $('bindTip').classList.toggle('hidden', Boolean(canAsk));
