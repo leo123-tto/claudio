@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 
-const SECRET_NAMES = ['deepseekApiKey', 'fishApiKey'];
+const SECRET_NAMES = ['deepseekApiKey', 'fishApiKey', 'localLlmApiKey', 'localTtsApiKey'];
 
 function cleanSecret(value, label) {
   if (value === null) return null;
@@ -35,6 +35,8 @@ export function createSecretStore({ file, fallbacks = {} }) {
     return {
       deepseekApiKey: Boolean(get('deepseekApiKey')),
       fishApiKey: Boolean(get('fishApiKey')),
+      localLlmApiKey: Boolean(get('localLlmApiKey')),
+      localTtsApiKey: Boolean(get('localTtsApiKey')),
     };
   }
 
@@ -66,6 +68,7 @@ const store = createSecretStore({
   fallbacks: {
     deepseekApiKey: config.llm.deepseek.apiKey,
     fishApiKey: config.tts.fish.apiKey,
+    localLlmApiKey: config.llm.local.apiKey,
   },
 });
 
@@ -82,5 +85,6 @@ export function credentialStatus() {
   return {
     deepseek: status.deepseekApiKey,
     fish: status.fishApiKey,
+    local: status.localLlmApiKey,
   };
 }

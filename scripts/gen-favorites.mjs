@@ -1,12 +1,12 @@
 // 从喜欢歌单 md 生成 user/favorites.md（歌名 — 歌手），兼容网易云/QQ 两种表格列序。
-// 用法：node scripts/gen-favorites.mjs [源md路径]
+// 用法：node scripts/gen-favorites.mjs <源md路径>
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const src = process.argv[2];
 if (!src) {
-  console.error('用法：node scripts/gen-favorites.mjs <歌单 Markdown 路径>');
+  console.error('用法：node scripts/gen-favorites.mjs <喜欢歌单导出的 md 路径>');
   process.exit(1);
 }
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

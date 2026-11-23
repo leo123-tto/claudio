@@ -10,7 +10,7 @@
 
 - 定位：读懂听歌习惯 → 规划声音 → 像 DJ 那样播报。
 - 截图里的形态：网页播放器，顶部音频波形，中部是聊天式字幕（Claudio 的口播逐句高亮 + 用户语音），底部播放控制。示例节目名 `mmguo's Pilot Episode`，正在放 `If — Bread`。
-- 架构图（用户提供）分四层，要点：
+- 架构图（老板提供）分四层，要点：
 
   1. **外部上下文**
      - `USER/` 用户品味语料：`taste.md` `routines.md` `playlists.json` `mood-rules.md`
@@ -32,7 +32,7 @@
      - `PWA/` localhost:8080：Player / Profile / Settings 三视图 · 单 `<audio>` · WS 流式聊天 · sw 缓存壳层 · prefetch 10s
      - HTTP 契约 6 条：`POST /api/chat` · `GET /api/now` · `GET /api/next` · `GET /api/taste` · `GET /api/plan/today` · `WS /stream`
 
-> 原图保存：见用户在 issue/对话中提供的两张截图（架构图 + 播放器 UI）。
+> 原图保存：见老板在 issue/对话中提供的两张截图（架构图 + 播放器 UI）。
 
 ---
 
@@ -85,4 +85,4 @@
 - [ ] 网易云 `/song/url` 在本机匿名 / 登录态下的可播率（spike-ncm 验证）
 - [ ] `claude -p --output-format json` 的确切信封字段与单次延迟（spike-claude 验证）
 - [ ] NeteaseCloudMusicApiEnhanced 的确切启动命令 / 端口
-- [ ] Fish Audio 计费与音色 reference_id（待用户提供 key）
+- [ ] Fish Audio 计费与音色 reference_id（待老板提供 key）

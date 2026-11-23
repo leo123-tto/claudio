@@ -1,217 +1,235 @@
-import { resolveAirPlayMode } from './airplay.js';
+import { resolveAirPlayMode, resolveAudioEngine } from './airplay.js';
 import { executePlayerAction } from './player-actions.js';
+import { classifyPlaybackFault } from './playback-fault.js';
+import { SAY_LEAD_S } from './say-sync.js';
+import { attachVoice } from './voice-stream.js';
+import { deviceIdentity } from './handoff.js';
+import { envelopeValue, equalPower, crossfadeDuration, mediaDeadline, waitForPlaying, waitForCanPlay } from './transitions.js';
+import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
+import { typewriter, renderStatic } from './subtitle.js';
+import { createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter } from './ui.js';
 
-// Claudio · Nothing 风格播放器
-// 双音轨交叉淡入 + 歌词滚动 + 波形 + 预生成 + 完整控件 + 时钟 + 主题切换。
+// Claudio · 点阵电台播放器
+// 两路音乐与独立口播混音；声音编排不依赖窗口绘制。
 const $ = (id) => document.getElementById(id);
 const el = {};
 [
-  'clockCanvas', 'weekday', 'date', 'waveBig', 'nowTitle', 'nowState',
+  'nowTitle', 'nowMeta', 'nowState',
   'prevBtn', 'playBtn', 'nextBtn', 'stopBtn', 'dislikeBtn', 'favBtn', 'vol',
   'curTime', 'durTime', 'bar', 'barFill', 'queueCount',
-  'liveTag', 'connMsg', 'stream', 'nowPlaying', 'moodInput', 'sleepBtn', 'sleepBadge', 'sendBtn', 'connState',
-  'fishCredit', 'fishCreditVal', 'miniLyric', 'airplayBtn',
-  'settingsBtn', 'settingsBackdrop', 'settingsClose', 'providerSelect', 'modelSelect', 'effortSelect',
-  'codexSettings', 'claudeSettings', 'deepseekSettings', 'grokSettings', 'claudeAccessSelect', 'claudeModelSelect',
-  'deepseekModelSelect', 'deepseekApiKey', 'deepseekKeyHint',
-  'grokModelSelect', 'grokEffortSelect', 'grokLoginHint', 'grokLoginBtn', 'grokLogoutBtn', 'grokOpenVerifyBtn', 'grokLoginResult',
-  'fishApiKey', 'fishModelSelect', 'fishVoiceId', 'fishKeyStatus', 'testFishBtn', 'fishTestResult', 'fishPreview',
-  'recommendationSelect', 'providerHint', 'testModelBtn', 'saveSettingsBtn', 'settingsResult',
-  'favoritesCount', 'favoritePlaylistInput', 'importFavoritesBtn', 'favoritesImportResult',
+  'liveTag', 'lanePill', 'laneText', 'connMsg', 'stream', 'nowPlaying', 'moodInput', 'voiceBtn', 'sleepBtn', 'sleepBadge', 'sendBtn', 'connState',
+  'meter', 'bdA', 'bdB', 'chat', 'chatLog', 'chatToggle', 'memoryPanel', 'memoryText',
+  'fullscreenBtn', 'airplayBtn',
+  'settingsBtn', 'settingsBackdrop', 'settingsClose', 'settingsResult', 'saveSettingsBtn',
+  'providerSeg', 'ttsSeg', 'modeSeg', 'themeSeg', 'llmWarn',
+  'localBaseUrl', 'localModel', 'localLlmApiKey', 'claudeModelSelect', 'deepseekModelSelect', 'deepseekApiKey',
+  'testModelBtn', 'modelResult',
+  'pc5090BaseUrl', 'pc5090Voice', 'fishApiKey', 'fishModelSelect', 'fishVoiceId', 'fishBalance', 'fishBalanceVal',
+  'testTtsBtn', 'ttsResult', 'ttsPreview',
+  'audioQualitySelect', 'favoritesCount', 'favoritePlaylistInput', 'importFavoritesBtn', 'favoritesImportResult', 'banList',
   'profileSummary', 'refreshProfileBtn',
 ].forEach((id) => (el[id] = $(id)));
+const progressEls = { fill: el.barFill, cur: el.curTime, dur: el.durTime };
 
-// ── Fish Audio 余额：右上角小组件，点一下开充值页（按量计费，低于 $1 标红提醒）──
+let settingsPayload = null;
+let exclusiveSink = null;
+let exclusiveTimer = null;
+let exclusiveGen = 0;
+let exclusiveHolder = null, exclusiveRequest = null;
+let exclusiveResumeIdx = -1;
+let chooseOutput = async () => {};
+const exclusiveClock = {
+  currentTime: 0,
+  duration: NaN,
+  paused: true,
+  readyState: 0,
+  listeners: new Map(),
+  addEventListener(type, fn) {
+    const list = this.listeners.get(type) || [];
+    list.push(fn);
+    this.listeners.set(type, list);
+  },
+  removeEventListener(type, fn) {
+    this.listeners.set(type, (this.listeners.get(type) || []).filter((item) => item !== fn));
+  },
+  emit(type) {
+    for (const fn of this.listeners.get(type) || []) fn();
+  },
+};
+let earOrigin = 0;
+let earKind = '';
+
+function beginEar(kind) {
+  earOrigin = performance.now();
+  earKind = kind;
+}
+
+function clearEar() {
+  earOrigin = 0;
+  earKind = '';
+}
+
+function reportEar(kind, phase, { action = '', clear = false } = {}) {
+  if (!earOrigin) return;
+  const earMs = Math.round(performance.now() - earOrigin);
+  const reportedKind = kind || earKind;
+  if (clear) clearEar();
+  if (!reportedKind) return;
+  fetch('/api/timing', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: reportedKind, phase, earMs, action }),
+  }).catch(() => {});
+}
+
+// ── 设置：大脑 / 语音 / 推荐 / 音质 / 曲库 / 记忆 ──
+const PROVIDER_NAMES = { local: '本地盒子', claude: 'Claude', deepseek: 'DeepSeek' };
+const OPTION_LABELS = {
+  sonnet: 'Sonnet', opus: 'Opus',
+  'deepseek-flash': 'V4.1 Flash', 'deepseek-v4-pro': 'V4 Pro',
+  s1: 'S1', 's2-pro': 'S2-Pro',
+  standard: '标准', higher: '较高', exhigh: '极高', lossless: '无损', hires: 'Hi-Res',
+};
 const FISH_RECHARGE = 'https://fish.audio/zh-CN/app/developers/';
+const seconds = (ms) => (ms / 1000).toFixed(1);
+
+function showResult(node, text, kind = '') {
+  node.textContent = text;
+  node.className = `result ${kind}`.trim();
+}
+async function sendJson(url, method, body, fallback) {
+  const init = { method };
+  if (body !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  const data = await (await fetch(url, init)).json();
+  if (!data.ok) throw new Error(data.error || fallback);
+  return data;
+}
+
+// 分段按钮：同一组里只有一个 aria-checked=true
+function segValue(box) {
+  return box.querySelector('[aria-checked="true"]')?.dataset.value || '';
+}
+function segSelect(box, value) {
+  box.querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.value === value)));
+}
+function onSeg(box, handler) {
+  box.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button || button.getAttribute('aria-checked') === 'true') return;
+    segSelect(box, button.dataset.value);
+    handler(button.dataset.value);
+  });
+}
+function fillSelect(select, ids, selected) {
+  const list = !selected || ids.includes(selected) ? ids : [selected, ...ids];
+  select.replaceChildren(...list.map((id) => new Option(OPTION_LABELS[id] || id, id)));
+  select.value = list.includes(selected) ? selected : list[0];
+}
+// 每组分段按钮对应的面板：[data-for=分段 id][data-pane=值]
+function syncPanes(box) {
+  const value = segValue(box);
+  document.querySelectorAll(`[data-for="${box.id}"]`).forEach((pane) => pane.classList.toggle('hidden', pane.dataset.pane !== value));
+}
+function syncSettingsPanes() {
+  syncPanes(el.providerSeg);
+  syncPanes(el.ttsSeg);
+  const provider = segValue(el.providerSeg);
+  el.llmWarn.classList.toggle('hidden', settingsPayload?.availability?.[provider] !== false);
+  el.llmWarn.textContent = provider === 'claude' ? '没找到 claude 命令' : '还没填 API Key';
+}
+function paintCredentials() {
+  const { credentials } = settingsPayload;
+  for (const [input, ready] of [
+    [el.localLlmApiKey, credentials.local],
+    [el.deepseekApiKey, credentials.deepseek],
+    [el.fishApiKey, credentials.fish],
+  ]) {
+    input.value = '';
+    input.placeholder = ready ? '已配置 · 留空不改' : '未配置';
+  }
+}
+function paintSettings() {
+  const { llm, tts, recommendation, playback, options } = settingsPayload;
+  segSelect(el.providerSeg, llm.provider);
+  el.localBaseUrl.value = llm.local.baseUrl;
+  el.localModel.value = llm.models.local;
+  fillSelect(el.claudeModelSelect, options.claudeModels, llm.models.claude);
+  fillSelect(el.deepseekModelSelect, options.deepseekModels, llm.models.deepseek);
+  segSelect(el.ttsSeg, tts.provider);
+  el.pc5090BaseUrl.value = tts.pc5090.baseUrl;
+  el.pc5090Voice.value = tts.pc5090.voice;
+  fillSelect(el.fishModelSelect, options.fishModels, tts.fish.model);
+  el.fishVoiceId.value = tts.fish.referenceId || '';
+  segSelect(el.modeSeg, recommendation.mode);
+  fillSelect(el.audioQualitySelect, options.audioQualities, playback.quality);
+  paintCredentials();
+  syncSettingsPanes();
+  loadFishCredit();
+}
+
+// Fish 余额只在设置里看：有 Key 才查，低于 $1 标红，点一下去充值
 async function loadFishCredit() {
+  el.fishBalance.classList.add('hidden');
+  if (segValue(el.ttsSeg) !== 'fish' || !settingsPayload?.credentials.fish) return;
   try {
     const j = await (await fetch('/api/fish-credit')).json();
-    if (j.ok && j.credit != null) {
-      const v = Number(j.credit);
-      el.fishCreditVal.textContent = `$${v.toFixed(2)}`;
-      el.fishCredit.classList.toggle('low', v < 1);
-      el.fishCredit.title = `Fish Audio 余额 $${v.toFixed(2)}（按量计费）· 点击去充值`;
-    } else {
-      el.fishCreditVal.textContent = '—';
-      el.fishCredit.title = 'Fish Audio 余额暂取不到 · 点击去充值页';
-    }
-  } catch { el.fishCreditVal.textContent = '—'; }
-}
-// Tauri webview 里 window.open 是 no-op（没浏览器开新标签页）→ 交后端用系统默认浏览器打开；普通浏览器仍直接开新标签
-function openExternal(url) {
-  if (window.__TAURI__) fetch('/api/open?url=' + encodeURIComponent(url)).catch(() => {});
-  else window.open(url, '_blank', 'noopener');
-}
-el.fishCredit.addEventListener('click', () => openExternal(FISH_RECHARGE));
-loadFishCredit();
-setInterval(loadFishCredit, 5 * 60 * 1000); // 每 5 分钟刷新
-
-// ── 设置：模型供应商 / ChatGPT 模型 / 推荐探索度，均为运行时切换 ──
-let settingsPayload = null;
-let grokPollTimer = null;
-const PROVIDER_NAMES = { codex: 'ChatGPT', claude: 'Claude', deepseek: 'DeepSeek', grok: 'Grok' };
-function showSettingsResult(text, kind = '') {
-  el.settingsResult.textContent = text;
-  el.settingsResult.className = `settings-result ${kind}`.trim();
-}
-function showFishResult(text, kind = '') {
-  el.fishTestResult.textContent = text;
-  el.fishTestResult.className = `settings-result ${kind}`.trim();
-}
-function showGrokResult(text, kind = '') {
-  el.grokLoginResult.textContent = text;
-  el.grokLoginResult.className = `settings-result ${kind}`.trim();
-}
-function grokAuthState() {
-  return settingsPayload?.auth?.grok || { loggedIn: false, email: '', pending: null };
-}
-function syncGrokLoginUi() {
-  const grok = grokAuthState();
-  const pending = grok.pending?.status === 'pending' ? grok.pending : null;
-  el.grokLoginBtn.classList.toggle('hidden', Boolean(grok.loggedIn));
-  el.grokLogoutBtn.classList.toggle('hidden', !grok.loggedIn);
-  el.grokOpenVerifyBtn.classList.toggle('hidden', !pending?.verificationUriComplete && !pending?.verificationUri);
-  el.grokLoginBtn.disabled = Boolean(pending);
-  if (pending) {
-    el.grokLoginHint.textContent = `请在打开的浏览器里完成验证${pending.userCode ? `，验证码 ${pending.userCode}` : ''}。`;
-    showGrokResult(pending.browserOpened === false
-      ? '未能自动打开浏览器，请点「打开验证页」。'
-      : '已弹出系统浏览器，正在等待验证…');
-  } else if (grok.loggedIn) {
-    el.grokLoginHint.textContent = grok.email
-      ? `已登录 Grok 订阅（${grok.email}）。登录态保存在本机，下次打开 App 无需再验证。`
-      : '已登录 Grok 订阅。登录态保存在本机，下次打开 App 无需再验证。';
-    showGrokResult('Grok 订阅可用。切换后从下一次推荐开始生效。', 'ok');
-  } else if (grok.pending?.status === 'error') {
-    el.grokLoginHint.textContent = '登录未完成，可以重新弹出浏览器验证。';
-    showGrokResult(grok.pending.error || '登录失败', 'error');
-  } else {
-    el.grokLoginHint.textContent = '尚未登录 Grok 订阅。点登录后会弹出系统浏览器，用 SuperGrok / X Premium+ 账号验证。';
-    showGrokResult('登录态只保存在这台电脑，界面不会回显 token。');
-  }
-}
-function stopGrokPoll() {
-  if (grokPollTimer) {
-    clearInterval(grokPollTimer);
-    grokPollTimer = null;
-  }
-}
-async function refreshGrokStatus() {
-  try {
-    const data = await (await fetch('/api/settings/grok')).json();
-    if (!data.ok) throw new Error(data.error || '读取失败');
-    if (data.settings) settingsPayload = data.settings;
-    else if (settingsPayload) settingsPayload.auth = { ...(settingsPayload.auth || {}), grok: data.grok };
-    syncGrokLoginUi();
-    syncProviderControls();
-    const pending = grokAuthState().pending?.status === 'pending';
-    if (!pending) stopGrokPoll();
-  } catch (error) {
-    showGrokResult(`登录状态读取失败：${error.message}`, 'error');
-  }
-}
-function startGrokPoll() {
-  stopGrokPoll();
-  grokPollTimer = setInterval(refreshGrokStatus, 1500);
-}
-function showFavoritesResult(text, kind = '') {
-  el.favoritesImportResult.textContent = text;
-  el.favoritesImportResult.className = `settings-result ${kind}`.trim();
-}
-function syncProviderControls() {
-  const provider = el.providerSelect.value;
-  const available = settingsPayload?.availability?.[provider];
-  el.codexSettings.classList.toggle('hidden', provider !== 'codex');
-  el.claudeSettings.classList.toggle('hidden', provider !== 'claude');
-  el.deepseekSettings.classList.toggle('hidden', provider !== 'deepseek');
-  el.grokSettings.classList.toggle('hidden', provider !== 'grok');
-  const descriptions = {
-    codex: '使用 ChatGPT 订阅；Luna 默认最快且质量平衡。',
-    grok: '使用 Grok 订阅；在浏览器验证一次后，登录态保存在本机。',
-    claude: '使用 Claude 订阅，可联动选择 Sonnet 或 Opus。',
-    deepseek: '使用 DeepSeek API，可联动选择 V4 Flash 或 V4 Pro。',
-  };
-  el.providerHint.textContent = `${descriptions[provider]} ${available ? '已检测到接入入口，可用“保存并测速”确认账号状态。' : '当前未检测到接入入口，请先确认登录或 API 配置。'}`;
+    const credit = j.ok && j.credit != null ? Number(j.credit) : NaN;
+    el.fishBalanceVal.textContent = Number.isFinite(credit) ? `$${credit.toFixed(2)}` : '读不到';
+    el.fishBalance.classList.toggle('low', Number.isFinite(credit) && credit < 1);
+    el.fishBalance.title = Number.isFinite(credit) ? '去充值' : String(j.error || '');
+    el.fishBalance.classList.remove('hidden');
+  } catch { /* 余额只是参考，读不到就不显示 */ }
 }
 async function loadSettings() {
   try {
     const data = await (await fetch('/api/settings')).json();
     if (!data.ok) throw new Error(data.error || '读取失败');
     settingsPayload = data.settings;
-    el.providerSelect.value = settingsPayload.llm.provider;
-    el.modelSelect.value = settingsPayload.llm.models.codex;
-    el.claudeModelSelect.value = settingsPayload.llm.models.claude;
-    el.deepseekModelSelect.value = settingsPayload.llm.models.deepseek;
-    el.grokModelSelect.value = settingsPayload.llm.models.grok || 'grok-4.6';
-    el.effortSelect.value = settingsPayload.llm.reasoningEffort;
-    el.grokEffortSelect.value = settingsPayload.llm.reasoningEffort;
-    el.fishModelSelect.value = settingsPayload.tts.fish.model;
-    el.fishVoiceId.value = settingsPayload.tts.fish.referenceId || '';
-    el.recommendationSelect.value = settingsPayload.recommendation.mode;
-    const deepseekReady = settingsPayload.credentials.deepseek;
-    const fishReady = settingsPayload.credentials.fish;
-    el.deepseekApiKey.value = '';
-    el.fishApiKey.value = '';
-    el.deepseekApiKey.placeholder = deepseekReady ? '已配置 · 留空不修改' : '填写后保存在本机';
-    el.fishApiKey.placeholder = fishReady ? '已配置 · 留空不修改' : '填写后保存在本机';
-    el.deepseekKeyHint.textContent = deepseekReady ? 'API Key 已配置，界面不会回显原值。' : '尚未配置 API Key。';
-    el.fishKeyStatus.textContent = fishReady ? 'API 已配置' : '未配置 API';
-    syncGrokLoginUi();
-    if (grokAuthState().pending?.status === 'pending') startGrokPoll();
-    else stopGrokPoll();
-    syncProviderControls();
+    paintSettings();
   } catch (error) {
-    showSettingsResult(`设置读取失败：${error.message}`, 'error');
+    showResult(el.settingsResult, `设置读取失败：${error.message}`, 'error');
   }
 }
 async function saveSettings({ quiet = false } = {}) {
+  newGeneration({ preserveMusic: true });
+  if (!settingsPayload) {
+    showResult(el.settingsResult, '设置还没读到，稍后再试', 'error');
+    return false;
+  }
   try {
-    const credentialResponse = await fetch('/api/settings/credentials', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deepseekApiKey: el.deepseekApiKey.value,
-        fishApiKey: el.fishApiKey.value,
-      }),
-    });
-    const credentialData = await credentialResponse.json();
-    if (!credentialData.ok) throw new Error(credentialData.error || '密钥保存失败');
-    const response = await fetch('/api/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        llm: {
-          provider: el.providerSelect.value,
-          models: {
-            codex: el.modelSelect.value,
-            claude: el.claudeModelSelect.value,
-            deepseek: el.deepseekModelSelect.value,
-            grok: el.grokModelSelect.value,
-          },
-          reasoningEffort: el.providerSelect.value === 'grok' ? el.grokEffortSelect.value : el.effortSelect.value,
+    // 密钥先存：空串 = 保持原值，界面不回显
+    await sendJson('/api/settings/credentials', 'PATCH', {
+      deepseekApiKey: el.deepseekApiKey.value,
+      fishApiKey: el.fishApiKey.value,
+      localLlmApiKey: el.localLlmApiKey.value,
+    }, '密钥保存失败');
+    const data = await sendJson('/api/settings', 'PATCH', {
+      llm: {
+        provider: segValue(el.providerSeg),
+        models: {
+          local: el.localModel.value,
+          claude: el.claudeModelSelect.value,
+          deepseek: el.deepseekModelSelect.value,
         },
-        tts: {
-          provider: 'fish',
-          fish: { model: el.fishModelSelect.value, referenceId: el.fishVoiceId.value },
-        },
-        recommendation: { mode: el.recommendationSelect.value },
-      }),
-    });
-    const data = await response.json();
-    if (!data.ok) throw new Error(data.error || '保存失败');
+        local: { baseUrl: el.localBaseUrl.value },
+      },
+      tts: {
+        provider: segValue(el.ttsSeg),
+        fish: { model: el.fishModelSelect.value, referenceId: el.fishVoiceId.value },
+        pc5090: { baseUrl: el.pc5090BaseUrl.value, voice: el.pc5090Voice.value },
+      },
+      recommendation: { mode: segValue(el.modeSeg) },
+      playback: { quality: el.audioQualitySelect.value },
+    }, '保存失败');
     settingsPayload = data.settings;
-    el.deepseekApiKey.value = '';
-    el.fishApiKey.value = '';
-    el.deepseekApiKey.placeholder = settingsPayload.credentials.deepseek ? '已配置 · 留空不修改' : '填写后保存在本机';
-    el.fishApiKey.placeholder = settingsPayload.credentials.fish ? '已配置 · 留空不修改' : '填写后保存在本机';
-    el.deepseekKeyHint.textContent = settingsPayload.credentials.deepseek ? 'API Key 已配置，界面不会回显原值。' : '尚未配置 API Key。';
-    el.fishKeyStatus.textContent = settingsPayload.credentials.fish ? 'API 已配置' : '未配置 API';
-    syncGrokLoginUi();
-    syncProviderControls();
-    if (!quiet) showSettingsResult('已保存，从下一次推荐开始生效。', 'ok');
+    paintSettings();
+    if (!quiet) showResult(el.settingsResult, '已保存，从下一次推荐开始生效', 'ok');
     return true;
   } catch (error) {
-    showSettingsResult(`保存失败：${error.message}`, 'error');
+    showResult(el.settingsResult, `保存失败：${error.message}`, 'error');
     return false;
   }
 }
@@ -233,267 +251,235 @@ async function loadProfileSummary() {
     el.profileSummary.textContent = `画像读取失败：${error.message}`;
   }
 }
+async function loadBans() {
+  if (!el.banList) return;
+  try {
+    const data = await (await fetch('/api/bans')).json();
+    const songs = Array.isArray(data.songs) ? data.songs : [];
+    el.banList.replaceChildren();
+    if (!songs.length) {
+      el.banList.textContent = '还没有禁播的歌。';
+      return;
+    }
+    for (const song of songs) {
+      const row = document.createElement('div');
+      row.className = 'ban-row';
+      const label = document.createElement('span');
+      label.textContent = song.artist ? `${song.title} — ${song.artist}` : song.title;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = '恢复';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          await fetch('/api/bans/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: song.title, artist: song.artist }),
+          });
+        } catch { /* 下次打开再读 */ }
+        loadBans();
+      });
+      row.append(label, button);
+      el.banList.append(row);
+    }
+  } catch {
+    el.banList.textContent = '禁播清单读不出来。';
+  }
+}
 async function loadFavoritesSummary() {
   try {
     const data = await (await fetch('/api/favorites')).json();
     if (!data.ok) throw new Error(data.error || '读取失败');
     el.favoritesCount.textContent = `${data.total} 首`;
-  } catch (error) {
+  } catch {
     el.favoritesCount.textContent = '读取失败';
   }
 }
 function openSettings() {
   el.settingsBackdrop.classList.remove('hidden');
   el.settingsBackdrop.setAttribute('aria-hidden', 'false');
+  showResult(el.settingsResult, '');
   loadSettings();
   loadFavoritesSummary();
   loadProfileSummary();
+  loadBans();
+  idleHider.refresh();
 }
 function closeSettings() {
+  el.ttsPreview.pause();
   el.settingsBackdrop.classList.add('hidden');
   el.settingsBackdrop.setAttribute('aria-hidden', 'true');
-  stopGrokPoll();
+  idleHider.refresh();
 }
 el.settingsBtn.addEventListener('click', openSettings);
 el.settingsClose.addEventListener('click', closeSettings);
 el.settingsBackdrop.addEventListener('click', (event) => { if (event.target === el.settingsBackdrop) closeSettings(); });
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeSettings(); });
-el.providerSelect.addEventListener('change', syncProviderControls);
+onSeg(el.providerSeg, syncSettingsPanes);
+onSeg(el.ttsSeg, () => { syncSettingsPanes(); loadFishCredit(); });
+el.fishBalance.addEventListener('click', () => window.open(FISH_RECHARGE, '_blank', 'noopener'));
 el.saveSettingsBtn.addEventListener('click', () => saveSettings());
 el.refreshProfileBtn.addEventListener('click', loadProfileSummary);
-el.grokLoginBtn.addEventListener('click', async () => {
-  el.grokLoginBtn.disabled = true;
-  showGrokResult('正在打开系统浏览器…');
-  try {
-    const data = await (await fetch('/api/settings/grok/login', { method: 'POST' })).json();
-    if (!data.ok) throw new Error(data.error || '无法开始登录');
-    if (data.settings) settingsPayload = data.settings;
-    else if (settingsPayload) settingsPayload.auth = { ...(settingsPayload.auth || {}), grok: data.grok };
-    syncGrokLoginUi();
-    const pending = grokAuthState().pending;
-    const verifyUrl = pending?.verificationUriComplete || pending?.verificationUri;
-    if (verifyUrl && pending?.browserOpened === false) openExternal(verifyUrl);
-    startGrokPoll();
-  } catch (error) {
-    el.grokLoginBtn.disabled = false;
-    showGrokResult(`无法开始登录：${error.message}`, 'error');
-  }
-});
-el.grokLogoutBtn.addEventListener('click', async () => {
-  stopGrokPoll();
-  try {
-    const data = await (await fetch('/api/settings/grok/logout', { method: 'POST' })).json();
-    if (!data.ok) throw new Error(data.error || '退出失败');
-    if (data.settings) settingsPayload = data.settings;
-    else if (settingsPayload) settingsPayload.auth = { ...(settingsPayload.auth || {}), grok: data.grok };
-    syncGrokLoginUi();
-    syncProviderControls();
-  } catch (error) {
-    showGrokResult(`退出失败：${error.message}`, 'error');
-  }
-});
-el.grokOpenVerifyBtn.addEventListener('click', () => {
-  const pending = grokAuthState().pending;
-  const verifyUrl = pending?.verificationUriComplete || pending?.verificationUri;
-  if (verifyUrl) openExternal(verifyUrl);
-});
 el.importFavoritesBtn.addEventListener('click', async () => {
   const playlist = el.favoritePlaylistInput.value.trim();
-  if (!playlist) return showFavoritesResult('请先粘贴网易云歌单链接或歌单 ID。', 'error');
+  if (!playlist) return showResult(el.favoritesImportResult, '请先粘贴网易云歌单链接或歌单 ID。', 'error');
   el.importFavoritesBtn.disabled = true;
-  showFavoritesResult('正在读取歌单并合并…');
+  showResult(el.favoritesImportResult, '正在读取歌单并合并…', 'pending');
   try {
-    const response = await fetch('/api/favorites/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ playlist }),
-    });
-    const data = await response.json();
-    if (!data.ok) throw new Error(data.error || '导入失败');
+    const data = await sendJson('/api/favorites/import', 'POST', { playlist }, '导入失败');
     el.favoritePlaylistInput.value = '';
     el.favoritesCount.textContent = `${data.total} 首`;
-    showFavoritesResult(`导入完成：读取 ${data.received} 首，新增 ${data.added} 首，跳过重复 ${data.duplicates} 首。`, 'ok');
+    showResult(el.favoritesImportResult, `导入完成：读取 ${data.received} 首，新增 ${data.added} 首，跳过重复 ${data.duplicates} 首。`, 'ok');
   } catch (error) {
-    showFavoritesResult(`导入失败：${error.message}`, 'error');
+    showResult(el.favoritesImportResult, `导入失败：${error.message}`, 'error');
   } finally {
     el.importFavoritesBtn.disabled = false;
   }
 });
 el.testModelBtn.addEventListener('click', async () => {
   el.testModelBtn.disabled = true;
-  showSettingsResult('正在保存并测速…');
+  showResult(el.modelResult, '正在测速…', 'pending');
   try {
-    if (!await saveSettings({ quiet: true })) return;
-    const data = await (await fetch('/api/settings/test', { method: 'POST' })).json();
-    if (!data.ok) throw new Error(data.error || '测速失败');
-    const timing = data.timing;
-    showSettingsResult(`${PROVIDER_NAMES[timing.provider] || timing.provider} · ${timing.model}：首字 ${(timing.firstTextMs / 1000).toFixed(1)} 秒，完成 ${(timing.totalMs / 1000).toFixed(1)} 秒。`, 'ok');
+    if (!await saveSettings({ quiet: true })) throw new Error('设置没存上');
+    const { timing } = await sendJson('/api/settings/test', 'POST', undefined, '测速失败');
+    showResult(el.modelResult, `${PROVIDER_NAMES[timing.provider] || timing.provider} · 首字 ${seconds(timing.firstTextMs)} 秒 · 完成 ${seconds(timing.totalMs)} 秒`, 'ok');
+    el.modelResult.title = timing.model;
   } catch (error) {
-    showSettingsResult(`测速失败：${error.message}`, 'error');
+    showResult(el.modelResult, `测速失败：${error.message}`, 'error');
   } finally {
     el.testModelBtn.disabled = false;
   }
 });
-el.testFishBtn.addEventListener('click', async () => {
-  el.testFishBtn.disabled = true;
-  el.fishPreview.pause();
-  el.fishPreview.classList.add('hidden');
-  showFishResult('正在保存并生成测试语音…');
+// 5090 冷启动要两分钟左右：等的时候给等待态，不是错误
+el.testTtsBtn.addEventListener('click', async () => {
+  const provider = segValue(el.ttsSeg);
+  el.testTtsBtn.disabled = true;
+  el.ttsPreview.pause();
+  el.ttsPreview.classList.add('hidden');
+  showResult(el.ttsResult, provider === 'pc5090' ? '合成中，冷启动要等约两分钟…' : '合成中…', 'pending');
   try {
-    if (!await saveSettings({ quiet: true })) throw new Error('设置保存失败');
-    const data = await (await fetch('/api/settings/test-fish', { method: 'POST' })).json();
-    if (!data.ok) throw new Error(data.error || 'Fish 测试失败');
-    el.fishPreview.src = data.audioUrl;
-    el.fishPreview.classList.remove('hidden');
-    const timing = data.timing;
-    showFishResult(`${timing.model}：首段音频 ${(timing.firstAudioMs / 1000).toFixed(1)} 秒，完成 ${(timing.totalMs / 1000).toFixed(1)} 秒。`, 'ok');
-    try { await el.fishPreview.play(); } catch { /* WebView 阻止自动播放时保留手动播放控件 */ }
-    loadFishCredit();
+    if (!await saveSettings({ quiet: true })) throw new Error('设置没存上');
+    const endpoint = provider === 'fish' ? '/api/settings/test-fish' : '/api/settings/test-pc5090-tts';
+    const data = await sendJson(endpoint, 'POST', undefined, '试听失败');
+    el.ttsPreview.src = data.audioUrl;
+    el.ttsPreview.classList.remove('hidden');
+    const { firstAudioMs, totalMs, hasVoice } = data.timing;
+    showResult(el.ttsResult, `开口 ${seconds(firstAudioMs)} 秒 · 完成 ${seconds(totalMs)} 秒${hasVoice ? '' : ' · 未设音色'}`, 'ok');
+    try { await el.ttsPreview.play(); } catch { /* WebView 阻止自动播放时保留手动播放控件 */ }
+    if (provider === 'fish') loadFishCredit();
   } catch (error) {
-    showFishResult(`语音测试失败：${error.message}`, 'error');
+    showResult(el.ttsResult, `试听失败：${error.message}`, 'error');
   } finally {
-    el.testFishBtn.disabled = false;
+    el.testTtsBtn.disabled = false;
   }
 });
 
-// ── 全局指针：把鼠标位置写进 CSS 变量 --mx/--my（px）与 --mxr/--myr（0~1），
-//    驱动光晕跟随 / 点阵聚光 / 卡片响应。逐帧只写一次（dirty flag），纯合成层、零 canvas。
-//    仅在「精确指针 + 支持 hover」的桌面注册；触屏/竖屏完全跳过。──
-if (matchMedia('(hover: hover) and (pointer: fine)').matches) {
-  let px = 0, py = 0, pdirty = false;
-  addEventListener('pointermove', (e) => {
-    px = e.clientX; py = e.clientY;
-    if (pdirty) return;
-    pdirty = true;
-    requestAnimationFrame(() => {
-      pdirty = false;
-      const r = document.documentElement.style;
-      r.setProperty('--mx', px + 'px');
-      r.setProperty('--my', py + 'px');
-      r.setProperty('--mxr', (px / innerWidth).toFixed(4));
-      r.setProperty('--myr', (py / innerHeight).toFixed(4));
-    });
-  }, { passive: true });
+// ── 外观 ──
+function applyTheme(theme) {
+  const apply = () => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('claudio-theme', theme);
+    segSelect(el.themeSeg, theme);
+    readMeterColors();
+    lyricView?.recenter();
+  };
+  // 支持的浏览器用 View Transitions 做柔和揭示，不支持则即时切换（零风险回退）
+  if (document.startViewTransition) document.startViewTransition(apply);
+  else apply();
 }
-
-// ── 时钟 ──
-const WEEK = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
-const MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-function tick() {
-  const d = new Date();
-  el.weekday.textContent = WEEK[d.getDay()];
-  el.date.textContent = `${String(d.getDate()).padStart(2, '0')} · ${MON[d.getMonth()]} · ${d.getFullYear()}`;
-}
-tick();
-setInterval(tick, 1000);
-
-// ── LED 点阵时钟（canvas 自绘：冒号垂直居中 + 呼吸 + 鼠标照亮点阵）──
-const DIGITS = {
-  '0': ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
-  '1': ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
-  '2': ['01110', '10001', '00001', '00110', '01000', '10000', '11111'],
-  '3': ['11110', '00001', '00001', '01110', '00001', '00001', '11110'],
-  '4': ['00010', '00110', '01010', '10010', '11111', '00010', '00010'],
-  '5': ['11111', '10000', '11110', '00001', '00001', '10001', '01110'],
-  '6': ['00110', '01000', '10000', '11110', '10001', '10001', '01110'],
-  '7': ['11111', '00001', '00010', '00100', '01000', '01000', '01000'],
-  '8': ['01110', '10001', '10001', '01110', '10001', '10001', '01110'],
-  '9': ['01110', '10001', '10001', '01111', '00001', '00010', '01100'],
-};
-const clk = el.clockCanvas;
-const cctx = clk.getContext('2d');
-let cmx = -999, cmy = -999;
-clk.addEventListener('mousemove', (e) => { const r = clk.getBoundingClientRect(); cmx = (e.clientX - r.left) * devicePixelRatio; cmy = (e.clientY - r.top) * devicePixelRatio; });
-clk.addEventListener('mouseleave', () => { cmx = cmy = -999; });
-
-function drawClock() {
-  const dpr = devicePixelRatio;
-  const W = clk.clientWidth * dpr, H = clk.clientHeight * dpr;
-  if (clk.width !== W || clk.height !== H) { clk.width = W; clk.height = H; }
-  cctx.clearRect(0, 0, W, H);
-
-  const now = new Date();
-  const s = String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
-  const COLS = 25, ROWS = 7;
-  const cell = Math.min(W / (COLS + 2), H / (ROWS + 1.5));
-  const dotR = cell * 0.22; // 点更细 → LED 更精致（Nothing 风格）
-  const ox = (W - COLS * cell) / 2, oy = (H - ROWS * cell) / 2;
-  const css = getComputedStyle(document.documentElement);
-  const accent = css.getPropertyValue('--accent').trim() || '#00e08a';
-  const fg = css.getPropertyValue('--fg').trim() || '#fff';
-
-  function dot(cx, cy, on, color, alpha) {
-    const near = Math.max(0, 1 - Math.hypot(cx - cmx, cy - cmy) / (cell * 5));
-    cctx.beginPath();
-    cctx.arc(cx, cy, dotR, 0, Math.PI * 2);
-    if (on) {
-      cctx.shadowColor = color; cctx.shadowBlur = dotR * 1.4 + near * 12;
-      cctx.fillStyle = color; cctx.globalAlpha = alpha ?? 1;
-    } else {
-      cctx.shadowBlur = 0; cctx.fillStyle = fg; cctx.globalAlpha = 0.05 + near * 0.45;
-    }
-    cctx.fill();
-  }
-  function digit(ch, colOff) {
-    const pat = DIGITS[ch] || DIGITS['0'];
-    for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++) {
-      dot(ox + (colOff + c) * cell + cell / 2, oy + r * cell + cell / 2, pat[r][c] === '1', fg);
-    }
-  }
-  digit(s[0], 0); digit(s[1], 6);
-  const colonAlpha = 0.3 + 0.7 * Math.abs(Math.sin(performance.now() / 700));
-  for (const r of [2, 4]) dot(ox + 12 * cell + cell / 2, oy + r * cell + cell / 2, true, accent, colonAlpha);
-  digit(s[2], 14); digit(s[3], 20);
-
-  cctx.shadowBlur = 0; cctx.globalAlpha = 1;
-  requestAnimationFrame(drawClock);
-}
-drawClock();
-
-// ── 主题切换 ──
-const savedTheme = localStorage.getItem('claudio-theme') || 'dark';
+const savedTheme = localStorage.getItem('claudio-theme') === 'light' ? 'light' : 'dark';
 document.documentElement.dataset.theme = savedTheme;
-syncThemeBtns(savedTheme);
-document.querySelectorAll('[data-theme-btn]').forEach((b) => {
-  b.addEventListener('click', () => {
-    const t = b.dataset.themeBtn;
-    const apply = () => {
-      document.documentElement.dataset.theme = t;
-      localStorage.setItem('claudio-theme', t);
-      syncThemeBtns(t);
-    };
-    // 支持的浏览器用 View Transitions 做柔和揭示，不支持则即时切换（零风险回退）
-    if (document.startViewTransition) document.startViewTransition(apply);
-    else apply();
-  });
-});
-function syncThemeBtns(t) {
-  document.querySelectorAll('[data-theme-btn]').forEach((b) => b.classList.toggle('active', b.dataset.themeBtn === t));
+segSelect(el.themeSeg, savedTheme);
+onSeg(el.themeSeg, applyTheme);
+
+// ── 封面 / 曲目头：缩略图、宽窗大图、迷你条共用一张；背景另起两层交叉淡入 ──
+const covers = createCovers({ imgs: [...document.querySelectorAll('.cover-img')], bdA: el.bdA, bdB: el.bdB });
+const paintThumbs = covers.paintThumbs;
+const setBackdrop = covers.setBackdrop;
+function setNowPlaying(title, { artist = '', facts = '', cover = '' } = {}) {
+  el.nowTitle.textContent = title;
+  el.nowMeta.textContent = [artist, facts].filter(Boolean).join(' · ');
+  paintThumbs(cover);
+}
+
+// ── 对话条：这次打开以来，老板说了什么、Claudio 答了什么（只在界面里，不落盘）──
+const chatStrip = createChatStrip({ chat: el.chat, log: el.chatLog, toggle: el.chatToggle, onChange: () => idleHider.refresh() });
+const logChat = chatStrip.add;
+const setChatOpen = chatStrip.setOpen;
+
+// ── 语音通道提示：5090 冷启动约两分钟，顶栏据此显示 ──
+let laneTimer = null;
+let laneStarting = false;
+function showLane(state, message = '') {
+  const texts = { starting: '5090 语音启动中', busy: '5090 在忙', ready: '语音就绪' };
+  if (!(state in texts) && state !== 'error') return;
+  clearTimeout(laneTimer);
+  laneStarting = state === 'starting';
+  // 聊天还在等口播开口：5090 冷启动要两分钟，这次不等了先放歌；起来了或出错，从现在起再给正常的等待
+  if (watchdog && !responseHeard) {
+    if (laneStarting && streamPending) skipChatVoice();
+    else armWatchdog(CHAT_VOICE_WAIT_MS, true);
+  }
+  el.lanePill.dataset.state = state;
+  el.laneText.textContent = texts[state] || String(message || '语音出错').slice(0, 40);
+  el.lanePill.title = state === 'error' ? String(message || '') : '';
+  el.lanePill.classList.remove('hidden');
+  const holdMs = { ready: 2500, busy: 8000, error: 8000 }[state] ?? 240000; // 忙碌短显；启动中最多保留 4 分钟
+  laneTimer = setTimeout(() => { laneStarting = false; el.lanePill.classList.add('hidden'); }, holdMs);
 }
 
 // （已去掉中/外切换：默认中文女声口播，选歌不限语言、看情况混搭）
 
 // ── 播放引擎 ──
-const MUSIC_LEAD = 6; // 口播结束前多少秒，下一首歌以背景音垫进来（用户要 5~6 秒）
+const MUSIC_LEAD = 6; // 口播结束前多少秒，下一首歌以背景音垫进来（老板要 5~6 秒）
 const BG_VOL = 0.13; // 口播/交互时音乐压到的背景音量（约 13%，让口播更突出）
 const SAY_GAIN = 1.25; // 口播增益：TTS 人声 RMS 比音乐低，用 GainNode 放大到 1.25x 提响（element.volume 上限 1.0 做不到）
-const SLEEP_MIN = 30; // 睡眠定时时长（分钟）
-const trackA = new Audio(), trackB = new Audio();
-[trackA, trackB].forEach((a) => (a.preload = 'auto'));
-let active = trackA, idle = trackB;
+const SLEEP_CHOICES = [15, 30, 45, 60, 90]; // 睡眠定时可选分钟
+const SLEEP_FADE_MS = 8000; // 到点淡出时长
+const SLEEP_KEY = 'claudio-sleep'; // 刷新后定时还在
+const musicA = new Audio(), musicB = new Audio(), voice = new Audio();
+const mediaTracks = [musicA, musicB, voice];
+// 口播放慢到 0.9 倍、不变调（2026-11-22 老板听样本定：5090 的音色念得偏快）
+const VOICE_RATE = 0.9;
+voice.defaultPlaybackRate = VOICE_RATE;
+voice.playbackRate = VOICE_RATE;
+// 口播的逻辑地址：边收边播时 <audio> 的 src 是 blob:，比较要看这个。
+let voiceSrc = '';
+let voiceFeed = null;
+function setVoiceSource(url, { preload = false } = {}) {
+  if (voiceSrc === url) return;
+  voice.pause();
+  voiceFeed?.abort();
+  voiceSrc = url;
+  voiceFeed = attachVoice(voice, url, { onFallback: (why) => console.warn('[voice] 边收边播没开成，改直接放：', why) });
+  if (preload && voiceFeed.mode === 'direct') voice.load();
+  voice.playbackRate = VOICE_RATE;
+}
+voice.preservesPitch = true;
+mediaTracks.forEach((a) => (a.preload = 'auto'));
+let active = musicA, idle = musicB;
+const hasWebkitPicker = typeof musicA.webkitShowPlaybackTargetPicker === 'function';
+const AUDIO_ENGINE = (() => {
+  let stored = '';
+  try { stored = localStorage.getItem('claudio-audio') || ''; } catch {}
+  const engine = resolveAudioEngine(location.search, stored);
+  try { localStorage.setItem('claudio-audio', engine); } catch {}
+  return engine;
+})();
 const AIRPLAY_MODE = resolveAirPlayMode({
-  tauri: Boolean(window.__TAURI__ || window.__TAURI_INTERNALS__),
-  webkitPicker: typeof trackA.webkitShowPlaybackTargetPicker === 'function',
+  webAudio: AUDIO_ENGINE === 'webaudio',
+  webkitPicker: hasWebkitPicker,
+  outputMenu: !hasWebkitPicker,
 });
 
 // 歌曲直链跨域，走后端 /proxy 转成同源才能做真频谱；口播 /tts 本就同源不变
 const proxyUrl = (u) => (typeof u === 'string' && /^https?:\/\//.test(u) && !u.startsWith(location.origin)) ? `/proxy?url=${encodeURIComponent(u)}` : u;
 
-// WebAudio 真频谱：AudioContext + AnalyserNode 接两条音轨。须在用户手势内激活（autoplay 同款限制）；
-// 两个 MediaElementSource 都汇入同一 analyser → destination，交叉淡入两轨同响时是混合频谱（正合适）。
+// WebAudio 真频谱：AudioContext + AnalyserNode 接三条音轨。须在用户手势内激活（autoplay 同款限制）；
+// 三个 MediaElementSource 都汇入同一 analyser → destination，交叉淡入两轨同响时是混合频谱（正合适）。
 let actx = null, analyser = null, freqData = null;
 const sourced = new WeakSet(); // 记录已建过 MediaElementSource 的轨：同一 audio 元素重复 createMediaElementSource 会抛错，只建一次
-const gains = new WeakMap();   // track → GainNode：音量走 gain。关键——WKWebView 下音频一旦接入 WebAudio 图，element.volume 对输出无效，必须用 GainNode 控音量
+const gains = new WeakMap();   // track → GainNode：音量走 gain。关键——Safari（WebKit）里音频一旦接入 WebAudio 图，element.volume 对输出无效，必须用 GainNode 控音量
 const volMap = new WeakMap();  // track → 意向音量 0~1：读音量的真源（element.volume 被 gain 接管后不再可靠）
 function trackVol(track) { return volMap.has(track) ? volMap.get(track) : track.volume; }
 function setTrackVol(track, v) {
@@ -517,12 +503,12 @@ function initAudio() {
     analyser.smoothingTimeConstant = 0.8;
     freqData = new Uint8Array(analyser.frequencyBinCount);
     analyser.connect(actx.destination); // 先连输出再逐个接源——任一源创建后立即有声路径，不致静音双音轨皇冠
-    for (const t of [trackA, trackB]) {
+    for (const t of mediaTracks) {
       if (sourced.has(t)) continue; // 已建过源的轨不重复建（防部分失败后重入抛 InvalidStateError、FFT 永久退化）
       const src = actx.createMediaElementSource(t);
       const g = actx.createGain();
       g.gain.value = trackVol(t); // 继承当前意向音量（默认 1）
-      src.connect(g).connect(analyser); // source → gain → analyser → destination：音量走 gain，WKWebView 下才真生效
+      src.connect(g).connect(analyser); // source → gain → analyser → destination：音量走 gain，Safari 里才真生效
       gains.set(t, g);
       t.volume = 1; // 元素音量交给 gain，自身设满
       sourced.add(t);
@@ -534,21 +520,21 @@ function initAudio() {
 }
 let queue = [], idx = -1;
 let activeEpisode = null;
-let started = false, busy = false, crossing = false, lastLyric = -1;
-let lrc = null, masterVol = 1;
-let sleepEnd = null, sleepTimer = null, sleepBadgeTimer = null;
-let ducked = false; // 是否处于「说话时当前歌背景小声续播」态
-let overlaying = false; // 是否处于「口播叠在背景歌之上」阶段（此时 active 是旧歌、不归常规进度/blend 管）
+let started = false, busy = false, crossing = false;
+let masterVol = 1;
+let sleepEnd = null, sleepAfterTrack = false, sleepTimer = null, sleepBadgeTimer = null;
+let ducked = false; // 只有语音可播后才压低音乐
+let overlaying = false; // 口播独占 voice，active 始终是当前显示的音乐
 let streamingActive = false; // 本次交互是否走流式（WS sayReady/episode 驱动）
 let streamPending = null; // 流式中后到的完整 episode（歌）
 let sayEnded = false; // 口播是否已念完（在等歌）
 let streamDone = false; // finishAfterSay 是否已执行（WS 与 HTTP 可能都触发，防重）
-let responseHeard = false; // 本轮 Fish 已真正开始播放；一旦开口，就不再因 HTTP 尚未收尾而误报 15 秒超时
+let responseHeard = false; // 本轮口播已出声，HTTP 失败不截断正在念的回复
 let watchdog = null; // 看门狗：duck/overlay 后必须有界时间内接管或强制恢复，兜住所有失败路径
 let sayOnEnd = null; // 当前 overlay 监听的 AbortController，重入时 abort，防泄漏与错时触发
 const favs = new Set(JSON.parse(localStorage.getItem('claudio-favs') || '[]'));
 const handledEpisodeActions = new Set();
-let songSession = null;
+const songSessions = new Map();
 const lastSongStarts = new Map();
 
 function reportListeningEvent(type, extra = {}) {
@@ -559,285 +545,954 @@ function reportListeningEvent(type, extra = {}) {
   }).catch(() => {});
 }
 
-function closeSongSession(reason = 'skip') {
-  if (!songSession) return;
-  const session = songSession;
-  songSession = null;
-  const currentTime = Number(session.track?.currentTime || 0);
-  const duration = Number(session.track?.duration || 0);
-  const listenRatio = duration > 0 ? Math.min(1, currentTime / duration) : (reason === 'completed' ? 1 : 0);
-  if (reason === 'completed') {
-    reportListeningEvent('play_completed', {
-      song: session.song,
-      listenedSec: currentTime,
-      durationSec: duration,
-      listenRatio,
-      discoveryType: session.discoveryType,
-    });
-  } else if (reason === 'skip') {
-    reportListeningEvent('skip', {
-      song: session.song,
-      listenedSec: currentTime,
-      durationSec: duration,
-      listenRatio,
-      discoveryType: session.discoveryType,
-    });
-  }
-}
-
-function startSongSession(item) {
-  closeSongSession('skip');
-  const song = { title: item.meta.title, artist: item.meta.artist };
-  const key = `${song.title}|${song.artist}`;
-  if (lastSongStarts.has(key)) reportListeningEvent('replay', { song, source: 'player' });
-  lastSongStarts.set(key, Date.now());
-  songSession = {
-    song,
-    track: active,
-    discoveryType: item.meta.discoveryType || 'adjacent',
-    progressSent: false,
-  };
-  reportListeningEvent('play_started', {
-    song,
-    discoveryType: songSession.discoveryType,
-    source: 'player',
+function closeSongSession(reason = 'skip', track = active) {
+  const session = songSessions.get(track);
+  if (!session) return;
+  songSessions.delete(track);
+  const currentTime = Number(session.track.currentTime || 0);
+  const duration = Number(session.track.duration || 0);
+  if (reason !== 'skip' && reason !== 'completed') return;
+  reportListeningEvent(reason === 'completed' ? 'play_completed' : 'skip', {
+    song: session.song, listenedSec: currentTime, durationSec: duration,
+    listenRatio: duration > 0 ? Math.min(1, currentTime / duration) : (reason === 'completed' ? 1 : 0),
+    discoveryType: session.discoveryType,
   });
 }
 
-const fmt = (s) => (isFinite(s) && s >= 0 ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00');
-const setState = (s) => (el.nowState.textContent = s);
-const setPlayIcon = (p) => { el.playBtn.textContent = p ? '⏸' : '▶'; document.body.classList.toggle('playing', p); };
-// 迷你窗里那一行：显示当前歌词 / 歌名 / 口播态（随播放更新）
-const setMiniLyric = (s) => { if (el.miniLyric) el.miniLyric.textContent = s || ''; };
-// 当前主轨目标音量：歌曲=原音量，口播=提响（集中一处，避免各路径漏改导致口播音量不一致）
-const songVol = () => masterVol;
-const sayVol = () => SAY_GAIN * masterVol;
-const activeTargetVol = () => (queue[idx]?.type === 'tts' ? sayVol() : songVol());
-
-function loadEpisode(ep) {
-  if (!ep || !ep.queue || !ep.queue.length) return;
-  closeSongSession('skip');
-  disarmWatchdog(); // 直接接管播放，撤看门狗
-  cancelBlend(); // 全新接管：停掉可能还在跑的交叉渐入，免得 idle 轨被抢
-  activeEpisode = ep;
-  queue = ep.queue;
-  idx = -1;
-  el.queueCount.textContent = `${queue.filter((q) => q.type === 'song').length} TRACKS`;
-  renderStream(ep);
-  playIndex(0);
+function startSongSession(item, track = active) {
+  closeSongSession('completed', track);
+  const song = { title: item.meta.title, artist: item.meta.artist };
+  const key = `${song.title}|${song.artist}`;
+  const discoveryType = item.meta.discoveryType || 'adjacent';
+  // 换设备接着放的那首不算重听、也不算新开一首。
+  if (!item.handoff && lastSongStarts.has(key)) reportListeningEvent('replay', { song, source: 'player', discoveryType });
+  lastSongStarts.set(key, Date.now());
+  songSessions.set(track, { song, track, discoveryType, progressSent: false });
+  if (!item.handoff) reportListeningEvent('play_started', { song, discoveryType, source: 'player' });
 }
 
-function playIndex(i) {
-  if (i !== idx) closeSongSession('skip');
-  if (i >= queue.length) {
-    // 聊天 / 控制的 TTS 念完就结束，绝不能因为队列为空自动生成一批歌。
-    if (activeEpisode?.intent === 'chat' || activeEpisode?.intent === 'control') {
-      active.pause();
+function reportProgress(track, clock = track) {
+  const session = songSessions.get(track);
+  const { currentTime, duration } = clock;
+  if (!session || session.progressSent || !(duration > 0) || currentTime / duration < 0.35) return;
+  session.progressSent = true;
+  reportListeningEvent('play_progress', {
+    song: session.song, listenedSec: currentTime, durationSec: duration,
+    listenRatio: currentTime / duration, discoveryType: session.discoveryType,
+  });
+}
+
+const fmt = fmtTime;
+const setState = (s) => { el.nowState.textContent = s; el.nowState.title = s; }; // 小状态条放不下的长句，悬停可读
+// 播放 / 暂停图标由 CSS 按 body.playing 切换
+const setPlayIcon = (p) => {
+  document.body.classList.toggle('playing', p);
+  el.playBtn.title = p ? '暂停' : '播放';
+};
+// 歌曲与口播各自的目标音量；直连输出时人声最终夹到 1。
+const songVol = () => masterVol;
+const sayVol = () => SAY_GAIN * masterVol;
+
+// 每次用户接管都在点击时换代，旧请求和延迟回调不能再改播放器。
+let playbackGen = 0;
+let playbackController = new AbortController();
+let paused = false, stopped = true;
+let latestEpoch = 0;
+const requests = { chat: null, claim: null, filler: null, voice: null };
+const pendingTimers = new Set();
+const pausedWork = new Map();
+const envelopes = new Map();
+const slots = new Map();
+let musicFade = null;
+let pendingEpisode = null, claimId = null, claimRetry = 0;
+let claimTask = null, serverGeneration = 0;
+const heldClaims = new Set();
+const episodeClaims = new WeakMap();
+const failedItems = new WeakSet();
+let claimPoll = null, voicePoll = null;
+let fillerItem = null, fillerPromise = null;
+const recentFillers = [];
+let voiceContext = null;
+let currentRequestId = null, chatVoiceUrl = null, chatVoiceFailed = false;
+let firstStartTimer = null;
+let switching = false;
+const uuid = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const alive = (gen) => gen === playbackGen && !playbackController.signal.aborted;
+
+let lyricView = null, displayedSong = null;
+let subtitleCancel = null;
+function musicElementForItem(item) {
+  return [musicA, musicB].find((track) => {
+    const slot = slots.get(track);
+    return item && slot?.item === item && !slot.loading;
+  }) || null;
+}
+function displayedSongClock() {
+  return exclusiveSink?.uid ? exclusiveClock : musicElementForItem(displayedSong);
+}
+function currentSongItem() {
+  const item = exclusiveSink?.uid ? queue[idx] : displayedSong || slots.get(active)?.item;
+  return item?.type === 'song' ? item : null;
+}
+const lyricClock = startLyricClock({
+  getTime: () => displayedSongClock()?.currentTime || 0,
+  isActive: () => {
+    const clock = displayedSongClock();
+    return Boolean(displayedSong && lyricView && clock && !clock.paused && !overlaying && !paused && !stopped);
+  },
+  onTick: (t) => lyricView?.setTime(t),
+});
+function bindLyrics(host, song) {
+  lyricView?.destroy();
+  lyricView = null;
+  displayedSong = song;
+  if (host) {
+    lyricView = createLyricView(host);
+    lyricView.render(parseLrc(song?.meta.lyric));
+    lyricView.setTime((displayedSongClock()?.currentTime || 0) + LYRIC_LEAD);
+    lyricView.recenter();
+    fetchMissingLyric(host, song);
+  }
+  lyricClock.refresh();
+}
+function fetchMissingLyric(host, song) {
+  const meta = song?.meta;
+  if (!meta?.id || meta.lyric || meta.lyricFetched) return;
+  meta.lyricFetched = true;
+  fetch(`/api/lyric?id=${encodeURIComponent(meta.id)}`).then((r) => r.json()).then((data) => {
+    if (!data?.lyric || meta.lyric) return;
+    meta.lyric = data.lyric;
+    if (displayedSong === song && host.isConnected && !overlaying) bindLyrics(host, song);
+  }).catch(() => {});
+}
+function cancelSubtitle() {
+  subtitleCancel?.();
+  subtitleCancel = null;
+}
+function showSubtitle(box, text, clock, duration = clock?.duration) {
+  cancelSubtitle();
+  subtitleCancel = typewriter(box, text, clock, { duration });
+}
+function clearStageView() {
+  cancelSubtitle();
+  lyricView?.destroy();
+  lyricView = null; displayedSong = null;
+  lyricClock.refresh();
+}
+function refreshLyrics() {
+  if (!overlaying) lyricView?.setTime((displayedSongClock()?.currentTime || 0) + LYRIC_LEAD);
+  lyricClock.refresh();
+}
+function recoverStage() {
+  cancelSubtitle();
+  // 垫歌失败不打断还在念的人声字幕。
+  if (overlaying && voiceContext) showSubtitle(el.stream.querySelector('.bubble'), voiceContext.text, voice);
+  else refreshLyrics();
+}
+
+function later(fn, ms, { gen = playbackGen, automatic = true, key } = {}) {
+  const timer = setTimeout(() => {
+    pendingTimers.delete(timer);
+    if (!alive(gen)) return;
+    if (automatic && paused) { pausedWork.set(key || timer, fn); return; }
+    fn();
+  }, ms);
+  pendingTimers.add(timer);
+  return timer;
+}
+function gated(key, fn) {
+  if (paused) { pausedWork.set(key, fn); return; }
+  fn();
+}
+function releaseClaim(holder, { notify = true } = {}) {
+  if (!holder?.claimId || holder.started || holder.released) return;
+  holder.released = true; heldClaims.delete(holder);
+  if (exclusiveHolder === holder) stopExclusiveClient();
+  for (const [track, slot] of slots) {
+    if (slot.holder === holder && slot.loading) { slot.controller?.abort(); track.pause(); slots.delete(track); }
+  }
+  if (!notify) return;
+  const source = serverGeneration;
+  const send = async (attempt = 0) => {
+    if (source !== serverGeneration) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch('/api/episode/release', {
+        method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ claimId: holder.claimId }),
+      });
+      if (!res.ok) throw new Error('释放节目失败');
+    } catch {
+      // 换歌、停止后也要补发；服务重启后不再发送旧编号。
+      if (attempt < 2 && source === serverGeneration) setTimeout(() => send(attempt + 1), 1000 * (attempt + 1));
+    } finally { clearTimeout(timer); }
+  };
+  void send();
+}
+function abandonPending(options) {
+  releaseClaim(pendingEpisode, options);
+  // 取消中的 claim 也可能已在服务端领取，按同一 ID 释放。
+  if (claimId && claimId !== pendingEpisode?.claimId) releaseClaim({ claimId }, options);
+  pendingEpisode = null;
+  claimId = null;
+  claimTask = null;
+  clearTimeout(claimPoll); clearTimeout(voicePoll);
+  claimPoll = voicePoll = null;
+}
+function newGeneration({ preservePending = false, preserveMusic = false } = {}) {
+  cancelSubtitle();
+  const restoreStage = overlaying;
+  applyEnvelopes();
+  playbackGen += 1;
+  playbackController.abort();
+  playbackController = new AbortController();
+  for (const request of Object.values(requests)) request?.abort();
+  for (const key of Object.keys(requests)) requests[key] = null;
+  for (const timer of pendingTimers) clearTimeout(timer);
+  pendingTimers.clear(); pausedWork.clear(); switching = false;
+  if (preserveMusic && paused) {
+    for (const track of [...resumeTracks]) {
+      if (track === active && slots.get(track)?.item?.type === 'song') {
+        track.pause(); resumeVolumes.set(track, songVol());
+      } else { resumeTracks.delete(track); resumeVolumes.delete(track); }
+    }
+  } else { resumeTracks.clear(); resumeVolumes.clear(); }
+  fillerPromise = null;
+  if (!preservePending) { abandonPending(); for (const holder of [...heldClaims]) releaseClaim(holder); }
+  if (voiceContext && !voiceContext.holder?.started) releaseClaim(voiceContext.holder);
+  sayOnEnd?.abort(); sayOnEnd = null;
+  voiceContext = null; slots.delete(voice);
+  const tail = musicFade?.old;
+  envelopes.clear(); musicFade = null; crossing = false;
+  for (const track of [musicA, musicB]) {
+    if (slots.get(track)?.loading) { track.pause(); slots.delete(track); }
+    if (track === tail || (track !== active && !track.paused)) {
+      track.pause(); closeSongSession('skip', track); slots.delete(track);
+    }
+  }
+  if (!voice.paused) rampVolume(voice, 0, 350, () => voice.pause());
+  if (!paused && !active.paused && !active.ended) rampVolume(active, songVol(), 300);
+  disarmWatchdog();
+  currentRequestId = null; chatVoiceUrl = null; chatVoiceFailed = false;
+  streamingActive = false; streamPending = null; streamDone = false; sayEnded = false; responseHeard = false;
+  overlaying = false; ducked = false;
+  busy = false; lockUI(false);
+  if (restoreStage) restoreAfterOverlay();
+  lyricClock.refresh();
+  return playbackGen;
+}
+function observeEpoch(epoch, keepClaim = false) {
+  if (!Number.isFinite(epoch) || epoch <= latestEpoch) return;
+  latestEpoch = epoch;
+  fillerItem = null; requests.filler?.abort(); requests.filler = null; fillerPromise = null;
+  if (!stopped) prefetchFiller();
+  requests.claim?.abort(); requests.voice?.abort();
+  requests.claim = requests.voice = null;
+  if (!keepClaim) {
+    if (pendingEpisode && pendingEpisode.episode.epoch < epoch) abandonPending();
+    else if (!pendingEpisode) abandonPending();
+  }
+  for (const holder of [...heldClaims]) if (holder.episode.epoch < epoch) releaseClaim(holder);
+  if (voiceContext?.holder && !voiceContext.holder.started && voiceContext.holder.episode.epoch < epoch) {
+    releaseClaim(voiceContext.holder);
+    sayOnEnd?.abort(); voice.pause(); voiceContext = null; unduck();
+    resumeTracks.delete(voice); resumeVolumes.delete(voice); envelopes.delete(voice);
+  }
+  if (!keepClaim && started && !stopped && !pendingEpisode) scheduleClaim(0);
+}
+function observeServerEpoch(epoch) {
+  if (!Number.isFinite(epoch) || epoch >= latestEpoch) { observeEpoch(epoch); return; }
+  // 重启后的服务不认识旧领取，丢弃即可，不能发回释放。
+  serverGeneration += 1;
+  latestEpoch = epoch;
+  requests.chat?.abort(); requests.claim?.abort(); requests.voice?.abort(); requests.filler?.abort();
+  requests.chat = requests.claim = requests.voice = requests.filler = null;
+  abandonPending({ notify: false });
+  for (const holder of [...heldClaims]) releaseClaim(holder, { notify: false });
+  if (voiceContext?.holder?.released) {
+    sayOnEnd?.abort(); voice.pause(); voiceContext = null; unduck();
+    resumeTracks.delete(voice); resumeVolumes.delete(voice); envelopes.delete(voice);
+  }
+  fillerItem = null; fillerPromise = null; emptyStreak = 0; claimRetry = 0;
+  if (currentRequestId) { failChat('电台已重新连接，音乐继续'); busy = false; lockUI(false); }
+  if (started && !stopped) {
+    prefetchFiller(); scheduleClaim(0);
+    if (!soundingMusic()) ensureFiller();
+  }
+}
+function acceptEpisode(ep) {
+  observeEpoch(ep?.epoch);
+  return ep && (!Number.isFinite(ep.epoch) || ep.epoch >= latestEpoch);
+}
+function markStarted(holder) {
+  if (!holder || holder.started || holder.released || !acceptEpisode(holder.episode)) return;
+  holder.started = true; heldClaims.delete(holder);
+  const gen = playbackGen;
+  const send = async (retry = false) => {
+    if (!alive(gen)) return;
+    try {
+      const res = await fetch('/api/episode/started', {
+        method: 'POST', signal: playbackController.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: holder.episode.id, claimId: holder.claimId }),
+      });
+      if (!res.ok) throw new Error('确认播放失败');
+    } catch {
+      if (!retry && alive(gen)) later(() => send(true), 700, { automatic: false });
+    }
+  };
+  send();
+}
+async function requestJson(kind, url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const parent = playbackController.signal;
+  const cancel = () => controller.abort();
+  parent.addEventListener('abort', cancel, { once: true });
+  requests[kind] = controller;
+  const timer = setTimeout(cancel, timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const data = await res.json();
+    if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
+    return { res, data };
+  } finally {
+    clearTimeout(timer); parent.removeEventListener('abort', cancel);
+    if (requests[kind] === controller) requests[kind] = null;
+  }
+}
+function loadEpisode(ep, holder = null) {
+  if (holder?.released || !acceptEpisode(ep) || !ep.queue?.length) return;
+  if (paused) { pausedWork.set('episode', () => loadEpisode(ep, holder)); return; }
+  if (exclusiveSink?.uid) {
+    activeEpisode = ep; queue = ep.queue; idx = -1;
+    renderStream(ep);
+    if (holder) episodeClaims.set(ep, holder);
+    playIndex(0);
+    return;
+  }
+  enterEpisodeSmooth(ep, holder);
+}
+function isPlaybackPaused() {
+  return paused || (exclusiveSink?.uid ? exclusiveClock.paused : stopped);
+}
+
+function stopExclusiveClient() {
+  exclusiveGen += 1;
+  exclusiveRequest?.abort(); exclusiveRequest = null; exclusiveHolder = null;
+  clearInterval(exclusiveTimer);
+  exclusiveTimer = null; exclusiveClock.paused = true;
+  lyricClock.refresh();
+  fetch('/api/exclusive/stop', { method: 'POST' }).catch(() => {});
+}
+
+function validExclusiveHolder(holder) {
+  return !holder || (!holder.released && (holder.started || holder.episode.epoch >= latestEpoch));
+}
+
+async function playExclusiveUrl(url, volume, holder = null) {
+  const gen = ++exclusiveGen;
+  exclusiveRequest?.abort();
+  const controller = new AbortController(), parent = playbackController.signal;
+  const cancel = () => controller.abort();
+  exclusiveRequest = controller; exclusiveHolder = holder;
+  parent.addEventListener('abort', cancel, { once: true });
+  clearInterval(exclusiveTimer);
+  exclusiveTimer = null;
+  exclusiveClock.paused = true;
+  try {
+    if (!exclusiveSink?.uid || !validExclusiveHolder(holder)) return { ok: false, stale: true };
+    const res = await fetch('/api/exclusive/play', {
+      signal: controller.signal,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: exclusiveSink.uid, url, volume }),
+    });
+    const data = await res.json();
+    if (controller.signal.aborted || gen !== exclusiveGen || !validExclusiveHolder(holder)) return { ok: false, stale: true };
+    return data;
+  } finally {
+    parent.removeEventListener('abort', cancel);
+    if (exclusiveRequest === controller) exclusiveRequest = null;
+  }
+}
+
+function watchExclusive(playToken, onEnded, holder = null) {
+  const gen = exclusiveGen;
+  clearInterval(exclusiveTimer);
+  exclusiveTimer = setInterval(async () => {
+    let data;
+    try { data = await (await fetch('/api/exclusive')).json(); } catch { return; }
+    if (gen !== exclusiveGen || !validExclusiveHolder(holder) || !data || data.token !== playToken) return;
+    exclusiveClock.currentTime = Number(data.seconds) || 0;
+    if (Number(data.duration) > 0) exclusiveClock.duration = Number(data.duration);
+    exclusiveClock.paused = paused || ['paused', 'idle', 'ended', 'error'].includes(data.event);
+    if (data.event === 'playing' && !paused) {
+      exclusiveClock.readyState = 3;
+      exclusiveClock.paused = false;
+      exclusiveClock.emit('playing');
+      markStarted(holder);
+      if (!overlaying) setPlayIcon(true);
+    } else if (data.event === 'paused' && !overlaying) {
       setPlayIcon(false);
-      if (activeEpisode.intent === 'control') applyEpisodeAction(activeEpisode);
-      else setState('LISTENING');
+    }
+    if (!overlaying) updateExclusiveProgress();
+    lyricClock.refresh();
+    if (data.event === 'ended' || data.event === 'error') {
+      clearInterval(exclusiveTimer);
+      exclusiveTimer = null;
+      onEnded(data);
+    }
+  }, 400);
+}
+
+function updateExclusiveProgress() {
+  const duration = exclusiveClock.duration;
+  const currentTime = exclusiveClock.currentTime;
+  paintProgress(progressEls, currentTime, duration);
+  const item = queue[idx];
+  if (item?.type === 'song') reportProgress(active, exclusiveClock);
+}
+
+function skipExclusiveItem(item, i, errorText) {
+  if (idx !== i) return;
+  cancelSubtitle();
+  if (item?.type === 'song') {
+    const fault = classifyPlaybackFault({
+      httpStatus: /失效/.test(errorText || '') ? 410 : 0,
+      mediaError: /读不出/.test(errorText || '') ? 3 : 4,
+    });
+    closeSongSession('skip');
+    setState(fault.text);
+    reportListeningEvent('play_failed', {
+      song: { title: item.meta.title, artist: item.meta.artist },
+      value: fault.reason,
+      source: 'player',
+    });
+  } else {
+    setState(errorText || '没能单独送到音箱');
+  }
+  playIndex(i + 1);
+}
+
+function playExclusiveIndex(item, i) {
+  const gen = playbackGen, holder = episodeClaims.get(activeEpisode);
+  // 一只播放器不能同时垫歌和念口播，所以音箱上是先念完再放歌。
+  overlaying = false;
+  onItemStart(item, i);
+  if (item.type === 'song') setState('正在送到音箱…');
+  const volume = item.type === 'tts' ? 1 : masterVol;
+  const playing = playExclusiveUrl(item.url, volume, holder), token = exclusiveGen;
+  const current = () => alive(gen) && token === exclusiveGen && validExclusiveHolder(holder) && idx === i;
+  playing.then((data) => {
+    if (!current() || data?.stale) return;
+    if (!data?.ok) {
+      skipExclusiveItem(item, i, data?.error || '');
       return;
     }
-    setState('这期放完了'); requestNext(); return;
+    if (paused) {
+      fetch('/api/exclusive/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'pause' }) }).catch(() => {});
+      pausedWork.set('exclusive', () => playExclusiveIndex(item, i));
+      return;
+    }
+    try { mediaTracks.forEach((track) => track.pause()); } catch { /* 本机音轨停掉，声音只留在音箱 */ }
+    cancelBlend();
+    exclusiveClock.currentTime = 0;
+    exclusiveClock.duration = Number(data.duration) || NaN;
+    exclusiveClock.readyState = data.event === 'playing' ? 3 : 0;
+    exclusiveClock.paused = false;
+    refreshLyrics();
+    if (item.type === 'tts') showSubtitle(el.stream.querySelector(`.line[data-idx="${i}"] .bubble`), item.text, exclusiveClock);
+    exclusiveClock.emit('playing');
+    if (data.event === 'playing') markStarted(holder);
+    setPlayIcon(true);
+    watchExclusive(data.token, (status) => {
+      if (idx !== i) return;
+      if (status?.event === 'error') {
+        skipExclusiveItem(item, i, status.error || '');
+        return;
+      }
+      if (item.type === 'song') closeSongSession('completed');
+      playIndex(i + 1);
+    }, holder);
+    if (item.type === 'song') prefetchFiller();
+  }).catch(() => { if (current()) skipExclusiveItem(item, i, ''); });
+}
+
+function applyOutputResult(data) {
+  if (!data || data.ok === false) return;
+  const nextUid = data.exclusive && data.uid ? String(data.uid) : '';
+  const prevUid = exclusiveSink?.uid || '';
+  if (!nextUid) {
+    const leaving = Boolean(prevUid);
+    exclusiveSink = null;
+    refreshLyrics();
+    if (leaving) stopExclusiveClient();
+    if (leaving && started && queue[idx]) playIndex(idx);
+    return;
   }
-  if (i < 0) i = 0;
-  idx = i;
+  const changed = !data.unchanged && prevUid !== nextUid;
+  if (changed) {
+    newGeneration();
+    mediaTracks.forEach((track) => track.pause());
+  }
+  exclusiveSink = { uid: nextUid, id: data.outputId || '', name: data.name || '' };
+  refreshLyrics();
+  if (changed && started && queue[idx]) playIndex(idx);
+}
+
+function playIndex(i, options = {}) {
+  if (paused) { pausedWork.set('advance', () => playIndex(i, options)); return; }
+  if (stopped) return;
+  if (i >= queue.length) {
+    if (activeEpisode?.intent === 'chat' || activeEpisode?.intent === 'control') {
+      if (activeEpisode.intent === 'control') applyEpisodeAction(activeEpisode);
+      return;
+    }
+    continueRadio();
+    return;
+  }
+  i = Math.max(0, i);
   const item = queue[i];
-  active.src = proxyUrl(item.url);
-  setTrackVol(active, item.type === 'tts' ? sayVol() : songVol()); // 口播提响，歌曲原音量
-  active.play().then(() => setPlayIcon(true)).catch(() => setState('点 ▶ 授权播放'));
-  crossing = false;
-  onItemStart(item, i);
+  if (failedItems.has(item)) { playIndex(i + 1, options); return; }
+  if (exclusiveSink?.uid) { idx = i; playExclusiveIndex(item, i); return; }
+  if (item.type === 'tts') {
+    startSayOverlay(item.url, item.text, () => activeEpisode);
+    return;
+  }
+  startMusic(item, i, { episode: activeEpisode, ...options });
+}
+
+// 摆出一首歌的界面：标题 / 封面 / 背景 / 收藏态 / 歌词。开新一首（onItemStart）和口播念完回到原来那首（restoreAfterOverlay）共用。
+function showSong(item, i) {
+  // 垫歌可以先出声，口播舞台仍保留到人声结束。
+  if (overlaying) return;
+  setNowPlaying(item.meta.title, {
+    artist: item.meta.artist,
+    facts: [item.meta.year, item.meta.genre].filter(Boolean).join(' · '),
+    cover: item.meta.cover,
+  });
+  setBackdrop(item.meta.cover);
+  setState('正在播放');
+  el.favBtn.classList.toggle('fav-on', favs.has(songKey(item.meta)));
+  el.dislikeBtn.classList.remove('dislike-on');
+  cancelSubtitle();
+  highlightLine(i);
+  bindLyrics(el.stream.querySelector(`.line[data-idx="${i}"] .lyric`), item);
+  el.nowPlaying.textContent = `Now playing: ${item.meta.title} — ${item.meta.artist}`;
 }
 
 function onItemStart(item, i) {
-  lastLyric = -1;
   if (item.type === 'song') {
     startSongSession(item);
-    el.nowTitle.textContent = `${item.meta.title} · ${item.meta.artist}`;
-    setState('PLAYING');
-    el.favBtn.classList.toggle('fav-on', favs.has(songKey(item.meta)));
-    el.dislikeBtn.classList.remove('dislike-on');
-    lrc = parseLrc(item.meta.lyric);
-    highlightLine(i);
-    renderLyric(i);
-    setMiniLyric(`♪ ${item.meta.title}`); // 起始先显示歌名，有歌词后由 updateLyric 滚动覆盖
-    el.nowPlaying.textContent = `Now playing: ${item.meta.title} — ${item.meta.artist}`;
+    showSong(item, i);
   } else {
-    el.nowTitle.textContent = 'CLAUDIO';
-    setState('ON AIR · 口播');
-    setMiniLyric('CLAUDIO · 口播');
-    lrc = null;
+    clearStageView();
+    setNowPlaying('CLAUDIO');
+    setState('正在念口播');
     highlightLine(i);
+    logChat('claudio', item.text);
     // 当前口播逐字流式出（配合念稿节奏）；renderStream 已渲染该 bubble，这里清空重打
     const box = el.stream.querySelector(`.line[data-idx="${i}"] .bubble`);
-    if (box && item.text) typewriter(box, item.text, active);
+    if (box && item.text) {
+      // 音箱返回后才有新口播时钟，不能先读上一首歌的进度。
+      if (exclusiveSink?.uid) box.replaceChildren();
+      else showSubtitle(box, item.text, voice);
+    }
   }
 }
 
-[trackA, trackB].forEach((a) => {
-  a.addEventListener('timeupdate', () => { if (a === active) onTimeUpdate(); });
-  a.addEventListener('ended', () => {
-    if (a === active && !crossing && !overlaying && !ducked) {
-      if (queue[idx]?.type === 'song') closeSongSession('completed');
-      playIndex(idx + 1);
+// 音量由真实经过时间计算，窗口恢复或媒体事件到来时立即补到当前值。
+function rampVolume(track, to, ms, done, targetRatio) {
+  const from = trackVol(track);
+  const toRatio = targetRatio ?? (masterVol ? to / masterVol : (done ? 0 : track === voice ? SAY_GAIN : ducked ? BG_VOL : 1));
+  envelopes.set(track, { from, to, fromRatio: masterVol ? from / masterVol : 0, toRatio,
+    start: performance.now(), duration: ms, done, gen: playbackGen });
+  applyEnvelopes();
+}
+function applyEnvelopes() {
+  const now = performance.now();
+  for (const [track, env] of [...envelopes]) {
+    if (!alive(env.gen)) { envelopes.delete(track); continue; }
+    if (paused && !env.pauseFade) continue;
+    setTrackVol(track, envelopeValue(env, now));
+    if (now - env.start >= env.duration) {
+      envelopes.delete(track);
+      env.done?.();
     }
-  });
-  a.addEventListener('error', () => {
-    if (a !== active || crossing || overlaying) return;
-    const item = queue[idx];
-    if (item?.type === 'tts') {
-      setState('Fish 语音失败，继续播放音乐');
-      playIndex(idx + 1);
-    } else if (item?.type === 'song') {
-      closeSongSession('skip');
-      setState('这首暂时无法播放，换下一首');
-      playIndex(idx + 1);
+  }
+  const fade = musicFade;
+  if (fade && alive(fade.gen) && !paused) {
+    const k = Math.max(0, Math.min(1, (now - fade.start) / fade.duration));
+    const power = equalPower(k);
+    const level = (ducked ? BG_VOL : 1) * masterVol;
+    setTrackVol(fade.old, fade.oldLevel * power.old * masterVol);
+    setTrackVol(fade.next, level * power.new);
+    if (k >= 1) {
+      musicFade = null; crossing = false;
+      fade.old.pause(); closeSongSession(fade.reason, fade.old);
     }
-  });
-  // 键盘媒体键 / 系统播放控制直接 play/pause 音频元素时，界面按钮与播放态跟着真实状态走
-  // （只在稳态同步：交叉淡入 / 口播叠加期的 play/pause 是内部编排，不动按钮，免得闪烁/串态）
-  a.addEventListener('play', () => { if (a === active && !crossing && !overlaying) setPlayIcon(true); });
-  a.addEventListener('pause', () => { if (a === active && !crossing && !overlaying && !a.ended) setPlayIcon(false); });
-});
+  }
+}
+setInterval(() => { applyEnvelopes(); if (!paused && !stopped) onTimeUpdate(); }, 30);
+document.addEventListener('visibilitychange', () => { applyEnvelopes(); if (!paused && !stopped) onTimeUpdate(); });
+
+function cancelBlend() {
+  musicFade = null; crossing = false;
+}
+function musicTarget() { return (ducked ? BG_VOL : 1) * masterVol; }
+function soundingMusic() {
+  if (exclusiveSink?.uid) return !exclusiveClock.paused || Boolean(exclusiveRequest);
+  return [musicA, musicB].some((t) => t.src && !t.paused && !t.ended);
+}
+function setEpisodeStage(ep) {
+  cancelSubtitle();
+  activeEpisode = ep; queue = ep.queue || [];
+  el.queueCount.textContent = `${queue.filter((q) => q.type === 'song').length} TRACKS`;
+  if (overlaying && voiceContext) showSayBubble(voiceContext.text, voice);
+  else renderStream(ep);
+}
+
+async function startMusic(item, i, { episode = activeEpisode, holder = null, bed = false, reason = 'completed', duration, startAt = 0 } = {}) {
+  if (holder?.released || exclusiveSink?.uid || paused || stopped || !item?.url) return;
+  const gen = playbackGen;
+  const old = active, next = idle;
+  if (slots.get(next)?.loading) return;
+  // 只占空闲音乐轨；正在淡出的尾音先收尾。
+  if (musicFade) {
+    musicFade.old.pause(); closeSongSession(musicFade.reason, musicFade.old);
+    cancelBlend();
+  }
+  envelopes.delete(next);
+  next.pause();
+  const preloaded = slots.get(next)?.prepared && slots.get(next)?.item === item;
+  const startedAt = performance.now();
+  const controller = new AbortController();
+  slots.set(next, { item, i, episode, holder, controller, loading: true, gen });
+  setTrackVol(next, 0);
+  if (!preloaded) next.src = proxyUrl(item.url);
+  // 换设备接着放：先设起点（浏览器会在加载后从这里开始），出声后再校一次。
+  if (startAt > 0) { try { next.currentTime = startAt; } catch { /* 加载后再校 */ } }
+  const signal = playbackController.signal;
+  const slot = slots.get(next);
+  slot.resume = () => {
+    const ctx = voiceContext;
+    if (bed && ctx) ctx.bedLoading = true;
+    return startMusic(item, i, { episode, holder, bed, reason, duration })
+      .finally(() => { if (bed && ctx) ctx.bedLoading = false; });
+  };
+  const cancel = () => { controller.abort(); if (slots.get(next) === slot && slot.loading) { next.pause(); slots.delete(next); } };
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    await waitForPlaying(next, { signal: controller.signal, timeoutMs: mediaDeadline(item.url) });
+    if (!alive(gen)) return;
+    if (exclusiveSink?.uid) { next.pause(); slots.delete(next); return; }
+    if (holder && (holder.released || holder.episode.epoch < latestEpoch)) { next.pause(); slots.delete(next); return; }
+    if (paused) {
+      next.pause(); slots.delete(next);
+      pausedWork.set('music', () => startMusic(item, i, { episode, holder, bed, reason, duration }));
+      return;
+    }
+    if (slots.get(next) !== slot) return;
+    if (startAt > 0 && Math.abs(next.currentTime - startAt) > 1.5) { try { next.currentTime = startAt; } catch { /* 不能拖就从头放 */ } }
+    slot.loading = false;
+    const oldMeta = slots.get(old)?.item?.meta;
+    active = next; idle = old;
+    if (episode && episode !== activeEpisode) setEpisodeStage(episode);
+    idx = i;
+    onItemStart(item, i);
+    setPlayIcon(true);
+    if (holder) markStarted(holder);
+    if (voiceContext && bed) {
+      voiceContext.bed = next;
+      if (voiceContext.origin === 'chat' && !old.paused) {
+        rampVolume(old, 0, 1200, () => { old.pause(); closeSongSession('skip', old); });
+      }
+    }
+    const ms = duration ?? crossfadeDuration(oldMeta, item.meta);
+    if (old.src && !old.paused && !old.ended && !bed) {
+      musicFade = { old, next, start: performance.now(), duration: ms, gen, reason,
+        oldLevel: masterVol ? trackVol(old) / masterVol : 1 };
+      crossing = true;
+    } else {
+      if (!bed) { old.pause(); closeSongSession(reason, old); }
+      rampVolume(next, bed ? BG_VOL * masterVol : musicTarget(), bed ? 1200 : 600);
+    }
+    prefetchFiller();
+    reportEar(earKind, 'song', { clear: true });
+  } catch (error) {
+    if (!alive(gen) || error.name === 'AbortError') return;
+    reportPlayFailure(item, next, error, { startAt, preloaded, ms: Math.round(performance.now() - startedAt) });
+    recoverStage();
+    if (slots.get(next) === slot) slots.delete(next); next.pause();
+    failedItems.add(item);
+    reportListeningEvent('play_failed', {
+      song: { title: item.meta?.title, artist: item.meta?.artist },
+      discoveryType: item.meta?.discoveryType, value: 'unavailable', source: 'player',
+    });
+    setState('这首暂时放不了，换一首');
+    const nextIndex = episode?.queue?.findIndex((q, n) => n > i && q.type === 'song') ?? -1;
+    if (nextIndex >= 0) await startMusic(episode.queue[nextIndex], nextIndex, { episode, holder, bed, reason });
+    else {
+      if (holder) releaseClaim(holder);
+      if (voiceContext?.holder === holder) voiceContext.bedFailed = true;
+      if (!soundingMusic()) ensureFiller();
+      requestNext();
+    }
+  } finally {
+    signal.removeEventListener('abort', cancel);
+  }
+}
+// 「这首暂时放不了」时把浏览器给的原因记进服务端日志（[play-fail]），下次能查。不记直链本身。
+function reportPlayFailure(item, track, error, extra = {}) {
+  const cause = error?.cause;
+  const src = String(track.currentSrc || track.src || '');
+  fetch('/api/play-diag', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      songId: item?.meta?.id, message: error?.message, cause: cause?.name || (cause?.code ? `MediaError ${cause.code}` : ''),
+      causeMessage: cause?.message, mediaError: track.error?.code || 0, networkState: track.networkState, readyState: track.readyState,
+      src: /\/media\//.test(src) ? 'media' : /\/proxy\?/.test(src) ? 'proxy' : src.startsWith('blob:') ? 'blob' : 'other',
+      handoff: Boolean(item?.handoff), currentTime: Math.round(Number(track.currentTime) || 0), ...extra,
+    }),
+  }).catch(() => {});
+}
+function startBlend(songItem, songIdx) {
+  if (voiceContext?.bed || slots.get(idle)?.loading) return;
+  const ctx = voiceContext;
+  if (!ctx || ctx.bedLoading) return;
+  ctx.bedLoading = true;
+  startMusic(songItem, songIdx, { episode: ctx.getEpisode() || activeEpisode,
+    holder: ctx.holder, bed: true, reason: ctx.origin === 'chat' ? 'skip' : 'completed' })
+    .finally(() => { ctx.bedLoading = false; });
+}
 
 function onTimeUpdate() {
-  if (overlaying) return; // 口播叠加在背景歌上的阶段，进度/blend 不在这里处理
+  if (paused || stopped || exclusiveSink?.uid) return;
+  reportProgress(musicA); reportProgress(musicB);
+  const item = slots.get(active)?.item;
   const { duration, currentTime } = active;
-  if (isFinite(duration) && duration > 0) {
-    el.barFill.style.width = (currentTime / duration) * 100 + '%';
-    el.curTime.textContent = fmt(currentTime);
-    el.durTime.textContent = fmt(duration);
+  if (item?.type === 'song' && !overlaying) {
+    paintProgress(progressEls, currentTime, duration);
   }
-  const item = queue[idx], next = queue[idx + 1];
-  if (item && item.type === 'tts' && next && next.type === 'song' && !crossing
-      && isFinite(duration) && currentTime > 0.8 && duration - currentTime <= MUSIC_LEAD) {
-    startBlend(next, idx + 1);
+  // 睡眠定时也在播放进度里查一次：iPhone 锁屏时计时器会被推迟，进度事件还在走。
+  if (checkSleep()) return;
+  if (sleepAfterTrack && item?.type === 'song' && !voiceContext?.audible) {
+    // 放完这首：不预载、不领下一期，尾巴上淡出。
+    const left = duration - currentTime;
+    if (Number.isFinite(left) && left <= SLEEP_FADE_MS / 1000) fadeOutStop(Math.max(300, left * 1000));
+    return;
   }
-  if (item && item.type === 'song' && lrc) updateLyric(currentTime);
-  if (item?.type === 'song' && songSession && !songSession.progressSent
-      && isFinite(duration) && duration > 0 && currentTime / duration >= 0.35) {
-    songSession.progressSent = true;
-    reportListeningEvent('play_progress', {
-      song: songSession.song,
-      listenedSec: currentTime,
-      durationSec: duration,
-      listenRatio: currentTime / duration,
-      discoveryType: songSession.discoveryType,
+  if (voiceContext?.audible) {
+    const outro = voiceContext.outro;
+    const tail = outro.duration - outro.currentTime;
+    if (voiceContext.origin === 'auto' && !voiceContext.outroFading && tail > 0 && tail <= 2) {
+      voiceContext.outroFading = true;
+      rampVolume(outro, 0, tail * 1000, null, 0);
+    }
+    if (voice.currentTime !== voiceContext.lastTime) {
+      voiceContext.lastTime = voice.currentTime; voiceContext.progressAt = performance.now();
+    } else if (!voice.paused && performance.now() - voiceContext.progressAt > WATCHDOG_MS) {
+      failVoice(); return;
+    }
+    const remaining = voice.duration - voice.currentTime;
+    const ep = voiceContext.getEpisode();
+    const first = ep?.queue?.findIndex((q) => q.type === 'song') ?? -1;
+    // 聊天点歌：口播一开口新歌就垫在下面；自动节目：口播快念完，或上一首已经放完（口播下面没声了）就垫进来。
+    const leadIn = voiceContext.origin === 'chat' || (Number.isFinite(remaining) && remaining <= MUSIC_LEAD)
+      || outro.paused || outro.ended;
+    if (first >= 0 && leadIn && !voiceContext.bed && !voiceContext.bedFailed) {
+      startBlend(ep.queue[first], first);
+    }
+  }
+  if (!item || active.ended || active.paused || voiceContext?.audible || musicFade) return;
+  const remain = duration - currentTime;
+  if (!Number.isFinite(remain)) return;
+  const following = queue.findIndex((q, n) => n > idx && q.type === 'song' && !failedItems.has(q));
+  if (following >= 0) {
+    if (remain <= 30 && !slots.get(idle)?.loading && slots.get(idle)?.item !== queue[following]) {
+      idle.pause(); envelopes.delete(idle);
+      slots.set(idle, { item: queue[following], prepared: true });
+      idle.src = proxyUrl(queue[following].url); idle.load();
+    }
+    if (remain <= crossfadeDuration(item.meta, queue[following].meta) / 1000 && !slots.get(idle)?.loading) {
+      startMusic(queue[following], following);
+    }
+  } else {
+    if (remain <= 30 && !pendingEpisode && !claimPoll) requestNext();
+    if (pendingEpisode) maybeEnterPending(remain);
+    if (remain <= 2 && ducked && !envelopes.has(active)) rampVolume(active, 0, remain * 1000, null, 0);
+  }
+}
+
+for (const track of mediaTracks) {
+  for (const event of ['play', 'playing', 'canplay', 'loadedmetadata', 'loadeddata', 'durationchange',
+    'timeupdate', 'ended', 'error', 'pause', 'waiting', 'stalled', 'seeking', 'seeked', 'progress', 'suspend', 'ratechange']) {
+    track.addEventListener(event, () => {
+      applyEnvelopes();
+      if (['play', 'playing', 'pause', 'ended', 'seeking', 'seeked', 'loadedmetadata'].includes(event)) refreshLyrics();
+      if (event === 'playing' && track === voice) {
+        el.lanePill.classList.add('hidden'); clearTimeout(laneTimer);
+      }
+      if (event === 'timeupdate' && track === active) onTimeUpdate();
+      if (['playing', 'pause', 'seeked'].includes(event) && (track === musicA || track === musicB)) reportPlaybackSoon();
+      if (event === 'timeupdate' && track === active) reportPlaybackTick();
+      if (track === voice || slots.get(track)?.loading) return;
+      if (event === 'ended') {
+        closeSongSession('completed', track);
+        if (track !== active || stopped) return;
+        if (sleepAfterTrack && !voiceContext?.audible) { fadeOutStop(300); return; }
+        if (checkSleep()) return;
+        gated('advance', () => {
+          if (voiceContext?.audible) return;
+          if (pendingEpisode) maybeEnterPending(0);
+          if (!voiceContext?.audible && !slots.get(idle)?.loading) playIndex(idx + 1);
+        });
+      }
+      if (event === 'error' && track === active && !stopped) {
+        recoverStage();
+        const item = slots.get(track)?.item;
+        if (item) reportListeningEvent('play_failed', { song: { title: item.meta.title, artist: item.meta.artist },
+          discoveryType: item.meta.discoveryType, value: classifyPlaybackFault({ mediaError: track.error?.code }).reason, source: 'player' });
+        closeSongSession('failed', track);
+        gated('advance', () => playIndex(idx + 1));
+      }
     });
   }
 }
 
-// 通用音量渐变：ms 内从当前音量平滑渐到 to（系数会乘 masterVol 由调用方决定），用于 duck / 回升 / 渐入。
-// 每次调用打一个递增的 token，旧的 ramp 检测到 token 变了就让位，避免多个 ramp 抢同一个 track。
-const rampToken = new WeakMap();
-function rampVolume(track, to, ms, done) {
-  const my = (rampToken.get(track) || 0) + 1;
-  rampToken.set(track, my);
-  const from = trackVol(track), t0 = performance.now();
-  const step = () => {
-    if (rampToken.get(track) !== my) return; // 被更新的 ramp 接管
-    const k = ms <= 0 ? 1 : Math.min(1, (performance.now() - t0) / ms);
-    setTrackVol(track, from + (to - from) * k);
-    if (k < 1) requestAnimationFrame(step);
-    else if (done) done();
-  };
-  requestAnimationFrame(step);
-}
-
-// 口播→歌 交叠（电台范儿）：口播念到最后 MUSIC_LEAD 秒，下一首歌「进来即 20% 背景音」（~1.2s 渐入后保持），
-// 垫在口播底下；口播一念完 → 停 ~1s → 音乐从 20% 慢慢（~2s）涨回原音量。DJ 讲话时音乐不抢戏，讲完才扬起。
-function startBlend(songItem, songIdx) {
-  crossing = true;
-  idle.src = proxyUrl(songItem.url);
-  setTrackVol(idle, 0);
-  idle.play().catch(() => {});
-  rampVolume(idle, BG_VOL * masterVol, 1200); // 下一首歌 ~1.2s 渐入到 20%，然后保持着垫在口播底下
-  const ramp = () => {
-    if (!crossing) return;
-    const dur = active.duration, ct = active.currentTime;
-    const remain = isFinite(dur) ? dur - ct : 0;
-    setTrackVol(active, sayVol()); // 口播保持（提响）音量念到底，不淡出
-    if (remain <= 0.06 || active.ended) {
-      active.pause();
-      [active, idle] = [idle, active]; // 音乐成为主轨（此刻是 20% 背景音）
-      idx = songIdx;
-      crossing = false;
-      onItemStart(queue[idx], idx);
-      // 口播结束 → 停 ~1s → 从 20% 慢慢（~2s）回到原音量（捕获 track 防这 3s 内 swap 写错轨；rampVolume 自带 token 防抢轨）
-      const songTrack = active;
-      setTimeout(() => rampVolume(songTrack, songVol(), 2000), 1000);
-      return;
-    }
-    requestAnimationFrame(ramp);
-  };
-  requestAnimationFrame(ramp);
-}
-
-// 取消进行中的口播→歌曲交叉渐入：把 crossing 置 false 让 blend 的 RAF 自行退出，并停掉 idle 轨，
-// 免得后到的口播/节目把正在 blend 的 idle 轨抢去改写、再被 blend 误当歌升为主轨（修真竞态）。
-function cancelBlend() {
-  if (!crossing) return;
-  crossing = false;
-  try { idle.pause(); } catch {}
-}
-
-// —— 说话/流式时的平滑接入：口播叠在背景歌上念，念完再接歌或回升 ——
-// 当前歌已被 chat() 压成背景小声续播。口播（idle 轨）淡入叠上去；念完后——
-// 有歌则旧歌淡出 + 新歌渐入；只聊天（没歌）则背景歌回升续放。
-// 流式（用户说话）：口播先到（sayReady）念、歌后到（episode）补；非流式：一次给完整 ep。统一走这套。
-function startSayOverlay(sayUrl, sayText, getEpisode) {
-  cancelBlend(); // 先取消进行中的交叉渐入，再让 idle 轨去念口播，避免 blend 抢写 idle / 误把口播音频升为主轨
-  // 口播叠加期间背景歌必须小声：不只依赖 chat() 说话瞬间的 duck（live 判断可能漏 → 没压成），
-  // 这里以「当前在放的主轨」为准再平滑压一次——口播一开始念，背景就降到 BG_VOL，确保口播听得清。
-  if (!ducked && active.src && !active.paused && !active.ended) {
-    // 兜底：chat() 已在说话瞬间慢慢压到 20% 了，这里仅在它漏压时才补压（同样 ~1.2s 平滑，不要突然一跳）
-    ducked = true;
-    rampVolume(active, BG_VOL * masterVol, 1200);
-  }
+async function startExclusiveSay(sayUrl, sayText, getEpisode) {
+  cancelBlend();
   overlaying = true;
   sayEnded = false;
   streamDone = false;
-  idx = 0;
-  document.body.classList.remove('thinking'); // 口播开始念 → 退出思考态
-  el.nowTitle.textContent = 'CLAUDIO';
-  setState('ON AIR · 口播');
-  setMiniLyric('CLAUDIO · 口播');
-  // 重入先撤掉上一次的监听（AbortController），避免泄漏 + 在错误时机触发 finishAfterSay
+  exclusiveResumeIdx = idx;
   if (sayOnEnd) sayOnEnd.abort();
   const ac = new AbortController();
   sayOnEnd = ac;
-  idle.src = sayUrl;
-  setTrackVol(idle, 0);
-  showSayBubble(sayText, idle); // 必须在 idle.src 设为口播后再启打字机，否则读到旧轨（上一首歌）的时长导致严重拖慢
-  // say 念完 → 有歌接歌、没歌等歌；任何「念不出来」(url 坏/解码失败/autoplay 被拦) 也走同一出口，绝不卡死
   const proceed = () => {
-    ac.abort(); // 一次性：撤掉 ended/error 两个监听
+    if (ac.signal.aborted) return;
+    ac.abort();
     const ep = getEpisode();
     if (ep) finishAfterSay(ep);
-    else sayEnded = true; // 歌还没到，等 episode 到了再接（看门狗兜底）
+    else {
+      sayEnded = true;
+      if (!currentRequestId) finishFailedChatVoice();
+    }
   };
-  idle.addEventListener('ended', proceed, { signal: ac.signal });
-  idle.addEventListener('error', proceed, { signal: ac.signal });
-  idle.play()
-    .then(() => {
-      responseHeard = true;
-      rampVolume(idle, sayVol(), 350); // 口播淡入（提响），叠在背景歌上
-      // 口播已真正开播 → 撤掉「从说话瞬间起算」的兜底看门狗（长思考后它会在念稿途中误砍口播、被歌顶掉），
-      // 改用「口播真实时长 + 8s 余量」重设：只在口播卡死 / ended 不触发时才兜底，绝不在念稿途中砍断（修：歌只顶掉口播三四秒就抢播）
-      const armByDur = () => armWatchdog(((isFinite(idle.duration) && idle.duration > 0 ? idle.duration : 30) + 8) * 1000, true);
-      if (isFinite(idle.duration) && idle.duration > 0) armByDur();
-      else idle.addEventListener('loadedmetadata', armByDur, { once: true, signal: ac.signal });
-    })
-    .catch(() => proceed());
+  let data;
+  try { data = await playExclusiveUrl(sayUrl, 1); } catch { data = null; }
+  if (ac.signal.aborted || data?.stale) return;
+  if (!data?.ok) { proceed(); return; }
+  if (paused) {
+    fetch('/api/exclusive/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'pause' }) }).catch(() => {});
+    pausedWork.set('exclusiveSay', () => startExclusiveSay(sayUrl, sayText, getEpisode));
+    return;
+  }
+  try { mediaTracks.forEach((track) => track.pause()); } catch { /* 口播也走音箱，避免本机再出一声 */ }
+  document.body.classList.remove('thinking');
+  setNowPlaying('CLAUDIO');
+  setState('正在念口播');
+  exclusiveClock.currentTime = 0;
+  exclusiveClock.duration = Number(data.duration) || NaN;
+  exclusiveClock.readyState = 3;
+  exclusiveClock.paused = false;
+  showSayBubble(sayText, exclusiveClock);
+  responseHeard = true;
+  reportEar(earKind, 'voice');
+  const armByDur = () => armWatchdog(((isFinite(exclusiveClock.duration) && exclusiveClock.duration > 0 ? exclusiveClock.duration : 30) + 8) * 1000, true);
+  armByDur();
+  watchExclusive(data.token, () => proceed());
 }
 
-function finishAfterSay(ep) {
-  if (streamDone) return; // 防重（WS 与 HTTP 可能都触发）
-  streamDone = true;
-  disarmWatchdog(); // 接管成功，撤看门狗
-  streamingActive = false;
-  overlaying = false;
+async function startSayOverlay(sayUrl, sayText, getEpisode, holder = null) {
+  if (holder?.released) return;
+  if (paused) { pausedWork.set('say', () => startSayOverlay(sayUrl, sayText, getEpisode, holder)); return; }
+  if (stopped) return;
+  if (exclusiveSink?.uid) { startExclusiveSay(sayUrl, sayText, getEpisode); return; }
+  if (voiceContext?.url === sayUrl) return;
+  sayOnEnd?.abort();
+  const ac = new AbortController();
+  const parent = playbackController.signal;
+  const cancel = () => ac.abort();
+  parent.addEventListener('abort', cancel, { once: true });
+  ac.signal.addEventListener('abort', () => parent.removeEventListener('abort', cancel), { once: true });
+  sayOnEnd = ac;
+  const gen = playbackGen;
+  const ctx = { url: sayUrl, text: sayText, getEpisode, holder, gen, audible: false,
+    origin: holder ? 'auto' : 'chat', bed: null, outro: active };
+  voiceContext = ctx;
+  sayEnded = false; streamDone = false;
+  setVoiceSource(sayUrl);
+  envelopes.delete(voice);
+  setTrackVol(voice, 0);
+  const proceed = () => {
+    if (!alive(gen) || ctx !== voiceContext) return;
+    gated('voiceEnd', () => {
+      sayEnded = true; voice.pause();
+      if (ctx.failed) { finishFailedChatVoice(ctx); return; }
+      const ep = getEpisode();
+      if (ep) finishAfterSay(ep);
+      else { ctx.audible = false; overlaying = false; unduck(); }
+    });
+  };
+  voice.addEventListener('ended', proceed, { once: true, signal: ac.signal });
+  voice.addEventListener('error', () => { if (!ac.signal.aborted) failVoice(ctx); }, { once: true, signal: ac.signal });
+  try {
+    // 首包等待与播放启动分开计时；等冷语音时歌曲始终正常音量。
+    await waitForCanPlay(voice, { signal: ac.signal, timeoutMs: laneStarting ? LANE_WAIT_MS : WATCHDOG_MS });
+    if (!alive(gen) || ctx !== voiceContext) return;
+    const reveal = () => {
+      if (!alive(gen) || ac.signal.aborted || ctx !== voiceContext) return;
+      overlaying = true; ducked = true;
+      document.body.classList.remove('thinking');
+      for (const music of [musicA, musicB]) if (!music.paused && !music.ended) rampVolume(music, BG_VOL * masterVol, 1200);
+      setNowPlaying('CLAUDIO'); setState('正在念口播');
+      showSayBubble(sayText, voice);
+      later(async () => {
+        try {
+          await waitForPlaying(voice, { signal: ac.signal, timeoutMs: mediaDeadline(sayUrl) });
+          if (!alive(gen) || ctx !== voiceContext) return;
+          if (paused) { voice.pause(); pausedWork.set('voicePlay', reveal); return; }
+          ctx.audible = true; ctx.lastTime = voice.currentTime; ctx.progressAt = performance.now(); responseHeard = true;
+          markStarted(holder);
+          if (pendingEpisode === holder) { pendingEpisode = null; claimId = null; }
+          reportEar(earKind, 'voice');
+          rampVolume(voice, sayVol(), 350);
+          el.lanePill.classList.add('hidden'); clearTimeout(laneTimer);
+          disarmWatchdog();
+        } catch (error) { if (error.name !== 'AbortError' && alive(gen)) failVoice(ctx); }
+      }, SAY_LEAD_S * 1000, { key: 'voiceLead' });
+    };
+    gated('say', reveal);
+  } catch (error) {
+    if (error.name !== 'AbortError' && alive(gen) && ctx === voiceContext) failVoice(ctx);
+  }
+}
+
+function failVoice(ctx = voiceContext) {
+  if (ctx && ctx !== voiceContext) return;
+  if (ctx?.failed) { finishFailedChatVoice(ctx); return; }
+  cancelSubtitle();
+  sayOnEnd?.abort(); voice.pause();
+  const ep = ctx ? ctx.getEpisode() : streamPending;
+  if (ctx?.holder?.episode) ctx.holder.episode.voice = { status: 'skipped' };
+  if (ep) {
+    ep.voice = { status: 'skipped' };
+    logChat('claudio', ep.say || ctx?.text);
+  } else showControlReply(ctx?.text || '语音暂时离线，先听音乐');
+  voiceContext = null; overlaying = false; ducked = false;
+  if (!ep) restoreAfterOverlay();
+  disarmWatchdog();
+  for (const music of [musicA, musicB]) if (!music.paused && !music.ended) rampVolume(music, songVol(), 1200);
+  setState('语音离线，先放歌');
+  if (ep) gated('voiceFailed', () => finishAfterSay(ep, ctx));
+}
+
+function finishExclusiveAfterSay(ep) {
+  cancelSubtitle();
   const songs = ep && ep.queue ? ep.queue.filter((q) => q.type === 'song') : [];
   if (songs.length) {
     closeSongSession('skip');
@@ -845,101 +1500,157 @@ function finishAfterSay(ep) {
     queue = ep.queue;
     el.queueCount.textContent = `${songs.length} TRACKS`;
     renderStream(ep);
-    const firstSong = songs[0];
-    const oldTrack = active;
-    rampVolume(oldTrack, 0, 1000, () => oldTrack.pause()); // 旧歌淡出
-    [active, idle] = [idle, active]; // 刚念完口播的轨升为主轨
-    idx = ep.queue.indexOf(firstSong);
-    active.src = proxyUrl(firstSong.url);
-    setTrackVol(active, 0);
-    active.play().catch(() => {});
-    onItemStart(firstSong, idx);
-    rampVolume(active, songVol(), 1400); // 新歌渐入
     ducked = false;
-  } else {
-    if (ep?.intent === 'control') applyEpisodeAction(ep);
-    if (ep?.action === 'pause' || ep?.action === 'stop') {
-      // 指令确认前背景歌曾被压低；暂停后先恢复目标音量，之后再继续不会只剩背景音量。
-      disarmWatchdog();
-      ducked = false;
-      document.body.classList.remove('thinking');
-      setTrackVol(active, activeTargetVol());
+    const firstSong = songs[0];
+    playIndex(ep.queue.indexOf(firstSong));
+    reportEar(earKind, 'song', { clear: true });
+    return;
+  }
+  if (ep?.intent === 'control') applyEpisodeAction(ep);
+  ducked = false;
+  document.body.classList.remove('thinking');
+  const resume = queue[exclusiveResumeIdx];
+  if (resume?.type === 'song') {
+    renderStream({ queue });
+    showSong(resume, exclusiveResumeIdx);
+  }
+  if (resume?.type === 'song' && ep?.action !== 'pause' && ep?.action !== 'stop') playIndex(exclusiveResumeIdx);
+  else setPlayIcon(ep?.action === 'pause' || ep?.action === 'stop' ? false : !isPlaybackPaused());
+  reportEar(earKind, 'stay', { clear: true });
+}
+
+// 口播气泡会顶掉歌曲舞台，念完后按当前显示的音乐轨恢复。
+function restoreAfterOverlay() {
+  cancelSubtitle();
+  const item = slots.get(active)?.item || queue[idx];
+  if (item?.type !== 'song') return;
+  renderStream({ queue });
+  showSong(item, idx);
+  if (paused) setState('已暂停');
+}
+function resumeBackground() {
+  unduck();
+  if (!exclusiveSink?.uid && !soundingMusic() && !paused && !stopped) playIndex(idx + 1);
+}
+function finishFailedChatVoice(ctx = voiceContext) {
+  if (ctx && ctx !== voiceContext) return;
+  if (exclusiveSink?.uid && overlaying && !responseHeard) stopExclusiveClient();
+  sayOnEnd?.abort(); sayOnEnd = null;
+  voice.pause(); envelopes.delete(voice);
+  resumeTracks.delete(voice); resumeVolumes.delete(voice);
+  voiceContext = null; sayEnded = true;
+  resumeBackground(); restoreAfterOverlay();
+  if (!soundingMusic() && !paused && !stopped) continueRadio();
+}
+function failChat(message) {
+  currentRequestId = null; chatVoiceFailed = true;
+  streamPending = null; streamingActive = false;
+  disarmWatchdog(); clearEar(); document.body.classList.remove('thinking');
+  setState(message);
+  // 已出声的回复允许念完，但不再等一个永远不会来的节目。
+  if (voiceContext?.audible && !sayEnded && !voice.ended) voiceContext.failed = true;
+  else if (!(exclusiveSink?.uid && overlaying && responseHeard && !sayEnded)) finishFailedChatVoice();
+}
+function finishAfterSay(ep, endedContext = voiceContext) {
+  if (endedContext?.holder?.released) return;
+  if (paused) { pausedWork.set('finishSay', () => finishAfterSay(ep, endedContext)); return; }
+  if (streamDone || stopped) return;
+  if (endedContext?.bedLoading) {
+    later(() => finishAfterSay(ep, endedContext), 100, { key: 'finishSay' });
+    return;
+  }
+  streamDone = true;
+  cancelSubtitle();
+  disarmWatchdog(); streamingActive = false; overlaying = false;
+  sayOnEnd?.abort(); voice.pause();
+  if (exclusiveSink?.uid) { finishExclusiveAfterSay(ep); return; }
+  const first = ep?.queue?.findIndex((q) => q.type === 'song') ?? -1;
+  const ctx = endedContext;
+  voiceContext = null;
+  if (first >= 0) {
+    const holder = ctx?.holder;
+    if (pendingEpisode === holder) { pendingEpisode = null; claimId = null; }
+    ducked = false;
+    if (ctx?.bed) {
+      const bed = ctx.bed, old = bed === musicA ? musicB : musicA;
+      rampVolume(old, 0, 600, () => { old.pause(); closeSongSession(ctx.origin === 'chat' ? 'skip' : 'completed', old); });
+      later(() => rampVolume(bed, songVol(), 2000), 600, { key: 'unduck' });
+      restoreAfterOverlay();
     } else {
-      unduck(); // 只聊天：背景歌回升续放
+      startMusic(ep.queue[first], first, { episode: ep, holder,
+        reason: ctx?.origin === 'chat' || !holder ? 'skip' : 'completed', duration: 1400 });
     }
+  } else {
+    restoreAfterOverlay();
+    if (ep?.intent === 'control') applyEpisodeAction(ep);
+    if (ep?.action !== 'pause' && ep?.action !== 'stop') resumeBackground();
+  }
+  reportEar(earKind, 'stay', { clear: true });
+}
+function enterEpisodeSmooth(ep, holder = null) {
+  if (holder?.released) return;
+  if (!acceptEpisode(ep)) { releaseClaim(holder); return; }
+  if (paused) { pausedWork.set('episode', () => enterEpisodeSmooth(ep, holder)); return; }
+  const say = ep?.queue?.find((q) => q.type === 'tts');
+  if (say && ep.voice?.status !== 'skipped') {
+    startSayOverlay(say.url, say.text || ep.say, () => ep, holder);
+  } else {
+    logChat('claudio', ep.say);
+    if (ep.say) setState('语音离线，先放歌');
+    const first = ep?.queue?.findIndex((q) => q.type === 'song') ?? -1;
+    if (first >= 0) startMusic(ep.queue[first], first, { episode: ep, holder, reason: holder ? 'completed' : 'skip' });
+    else { showControlReply(ep.say); if (ep.intent === 'control') applyEpisodeAction(ep); unduck(); }
   }
 }
-
-// 非流式（已有完整 episode）：等价地走同一套接入
-function enterEpisodeSmooth(ep) {
-  if (!ep || !ep.queue || !ep.queue.length) { unduck(); return; }
-  const say = ep.queue[0];
-  if (!say || say.type !== 'tts') { loadEpisode(ep); return; }
-  startSayOverlay(say.url, say.text, () => ep);
-}
-
-// —— 看门狗：chat() 一旦把当前歌 duck 成背景，就必须在有界时间内「成功接管」或「强制恢复」，
-//    兜住所有异步失败路径（WS 不来 sayReady / say 播放失败 / 歌一直不到 / 202 反复重试）。——
-const WATCHDOG_MS = 15000; // 用户可感知链路以 15 秒为硬边界：到点恢复音乐并明确提示，不无限等待。
-function armWatchdog(ms = WATCHDOG_MS, force = false) {
-  if (watchdog && !force) return; // 幂等：防 429 重试每次重置 → 看门狗永不触发、背景歌永久小声死锁
-  if (watchdog) clearTimeout(watchdog); // force：口播真正开播后用「口播时长 + 余量」重设，替换掉原来从说话瞬间起算的那个，免得长思考后误砍正在念的口播
-  watchdog = setTimeout(() => {
-    console.warn('[watchdog] 接管超时，强制恢复');
-    watchdog = null;
-    if (streamPending) { finishAfterSay(streamPending); return; }
-    streamingActive = false;
-    setState('超时，已恢复播放');
-    unduck();
-  }, ms);
-}
-function disarmWatchdog() { clearTimeout(watchdog); watchdog = null; }
-
-function unduck() {
+const WATCHDOG_MS = 60000; // HTTP 计划完成后，正常语音再等首包最多 60 秒。
+const LANE_WAIT_MS = 250000; // 5090 冷启动首包上限 240 秒，前端留 10 秒余量。
+const CHAT_VOICE_WAIT_MS = 8000; // 聊天点歌：歌和文字已到，口播最多再等 8 秒，过了先放歌
+function skipChatVoice() {
   disarmWatchdog();
-  document.body.classList.remove('thinking');
-  ducked = false;
-  overlaying = false;
-  rampVolume(active, activeTargetVol(), 2000); // 口播念完、没切歌 → 音乐 ~2s 慢慢回到原音量
+  chatVoiceFailed = true;
+  failVoice();
 }
-
-// 口播文字打字机：逐字流式显示口播稿，配合念稿节奏（优先用音频时长，否则按中文念速 ~180ms/字 估算）。
-// token 机制：新口播一来就 ++typeToken，旧打字机下一拍自行退出，绝不串字。
-let typeToken = 0;
-function typewriter(box, text, audio) {
-  if (!box) return;
-  const my = ++typeToken;
-  const chars = [...(text || '')];
-  let i = 0;
-  box.textContent = '';
-  box.classList.add('typing');
-  // 每字间隔：优先用真实音频时长 / 字数，拿不到则按中文念速 ~180ms/字 估算
-  const calcPer = () => {
-    const durMs = (audio && isFinite(audio.duration) && audio.duration > 0) ? audio.duration * 1000 : chars.length * 180;
-    return Math.max(25, Math.min(300, durMs / Math.max(1, chars.length)));
-  };
-  let per = calcPer();
-  // 口播 src 刚设时 duration 还是 NaN，等元数据到了用真实时长重算，真正配合念稿节奏
-  if (audio) audio.addEventListener('loadedmetadata', () => { if (my === typeToken) per = calcPer(); }, { once: true });
-  const step = () => {
-    if (my !== typeToken) return; // 被新口播打断
-    if (i >= chars.length) { box.classList.remove('typing'); return; }
-    box.textContent = chars.slice(0, ++i).join('');
-    setTimeout(step, per);
-  };
-  step();
+function armWatchdog(ms = WATCHDOG_MS, force = false) {
+  if (watchdog && !force) return;
+  disarmWatchdog();
+  watchdog = later(() => {
+    watchdog = null;
+    gated('watchdog', () => {
+      if (voiceContext?.audible) return;
+      chatVoiceFailed = true;
+      failVoice();
+    });
+  }, ms, { key: 'watchdog' });
+}
+function disarmWatchdog() { clearTimeout(watchdog); pendingTimers.delete(watchdog); watchdog = null; }
+function unduck() {
+  cancelSubtitle();
+  disarmWatchdog(); document.body.classList.remove('thinking');
+  ducked = false; overlaying = false;
+  if (exclusiveSink?.uid) {
+    const resume = queue[exclusiveResumeIdx];
+    if (resume?.type === 'song') playIndex(exclusiveResumeIdx);
+    return;
+  }
+  for (const music of [musicA, musicB]) if (!music.paused && !music.ended) rampVolume(music, songVol(), 2000);
+  if (!lyricView) restoreAfterOverlay();
+  refreshLyrics();
 }
 
 // 流式 sayReady 阶段还没有完整 episode，先显示口播气泡（打字机逐字出）
 function showSayBubble(text, audio) {
-  el.stream.innerHTML = '<div class="line active enter"><span class="who">Claudio</span><div class="bubble"></div></div>';
-  typewriter(el.stream.querySelector('.bubble'), text, audio);
+  clearStageView();
+  el.stream.innerHTML = BUBBLE_LINE;
+  el.stream.scrollTop = 0;
+  showSubtitle(el.stream.querySelector('.bubble'), text, audio);
+  logChat('claudio', text);
 }
 
 // ── 字幕流 ──
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function renderStream(ep) {
+  clearStageView();
   el.stream.innerHTML = '';
   ep.queue.forEach((item, i) => {
     const div = document.createElement('div');
@@ -962,202 +1673,513 @@ function highlightLine(i) {
   for (const n of el.stream.querySelectorAll('.line')) {
     n.classList.toggle('active', +n.dataset.idx === i);
   }
-  el.stream.querySelector(`.line[data-idx="${i}"]`)?.scrollIntoView({ block: 'nearest' });
-}
-
-function renderLyric(i) {
-  const box = el.stream.querySelector(`.line[data-idx="${i}"] .lyric`);
-  if (!box) return;
-  box.innerHTML = '';
-  if (!lrc) { box.textContent = '（这首暂无歌词）'; return; }
-  lrc.forEach((l, li) => {
-    const p = document.createElement('div');
-    p.className = 'lyric-line';
-    p.dataset.lyric = li;
-    p.textContent = l.text;
-    box.appendChild(p);
-  });
-}
-
-function updateLyric(t) {
-  let cur = -1;
-  for (let i = 0; i < lrc.length; i++) {
-    if (lrc[i].t == null) continue;
-    if (lrc[i].t <= t) cur = i; else break;
-  }
-  if (cur === lastLyric) return;
-  lastLyric = cur;
-  if (cur >= 0 && lrc[cur]) setMiniLyric(lrc[cur].text); // 迷你窗同步当前歌词行
-  const box = el.stream.querySelector('.line.active .lyric');
-  if (!box) return;
-  const lines = box.querySelectorAll('.lyric-line');
-  lines.forEach((n, i) => {
-    const d = Math.abs(i - cur);
-    n.classList.toggle('active', i === cur);
-    n.style.opacity = i === cur ? '1' : String(Math.max(0.12, 0.5 - d * 0.13));
-  });
-  lines[cur]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-}
-
-function parseLrc(text) {
-  if (!text) return null;
-  const out = [];
-  for (const line of text.split('\n')) {
-    const tm = line.match(/\[(\d+):(\d+)(?:[.:](\d+))?\]/);
-    const body = line.replace(/\[[^\]]*\]/g, '').trim();
-    if (!body) continue;
-    out.push(tm ? { t: +tm[1] * 60 + +tm[2] + (tm[3] ? +`0.${tm[3]}` : 0), text: body } : { t: null, text: body });
-  }
-  return out.length ? out : null;
+  el.stream.scrollTop = 0; // 换了一段内容：从头开始，别带着上一首歌词的滚动位置
+  if (queue[i]?.type !== 'song') el.stream.querySelector(`.line[data-idx="${i}"]`)?.scrollIntoView({ block: 'nearest' });
+  lyricView?.recenter();
 }
 
 // ── 请求一期 ──
 async function chat(input = '', mood = '') {
-  if (busy) return;
-  initAudio(); // 手势链内激活 AudioContext（首次说话/换心情也能起 FFT）
-  busy = true; lockUI(true); setState('思考中…');
-  document.body.classList.add('thinking'); // THINKING 动效：ducked 时波形静默，需独立 loader 填补等待空窗
-  // 感知层：说话的瞬间把当前歌压成背景小声、继续播，不戛然而止
-  const live = started && active.src && !active.paused && !active.ended;
-  // 当前在放的歌 → 随请求传给后端，让 DJ 知道「这首」指什么、评价时别乱换歌
-  const cur = queue[idx];
-  const nowPlaying = (cur && cur.type === 'song') ? { type: 'song', title: cur.meta.title, artist: cur.meta.artist } : null;
-  if (input) armWatchdog(); // 15 秒硬边界：有无背景歌都不能无限等待模型 / Fish
-  // 在听时说话 → 走流式：口播由 WS sayReady 先念、歌由 WS episode 接
-  streamingActive = !!input;
-  streamPending = null; sayEnded = false; streamDone = false;
-  responseHeard = false;
-  const controller = new AbortController();
-  const requestTimer = setTimeout(() => { if (!responseHeard) controller.abort(); }, 15000);
+  const gen = newGeneration({ preserveMusic: true });
+  beginEar(input ? 'chat' : 'next'); initAudio();
+  stopped = false; started = true;
+  busy = true; lockUI(true); setState('思考中，音乐继续');
+  document.body.classList.add('thinking');
+  streamingActive = true;
+  const requestId = uuid(); currentRequestId = requestId;
+  const cur = currentSongItem();
+  const nowPlaying = cur?.type === 'song' ? { type: 'song', title: cur.meta.title, artist: cur.meta.artist,
+    ...(cur.meta.year ? { year: cur.meta.year } : {}), ...(cur.meta.genre ? { genre: cur.meta.genre } : {}) } : null;
   try {
-    const res = await fetch('/api/chat', { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ input, mood, nowPlaying, sleep: sleepEnd ? { remainingMin: Math.max(1, Math.ceil((sleepEnd - Date.now()) / 60000)) } : null }) });
-    const data = await res.json();
-    if (data.ok && data.control) {
-      // 高频明确指令走本机直连，不等模型、不消耗 Fish；复杂或含糊的话仍由模型判断。
-      streamingActive = false;
-      streamPending = null;
-      disarmWatchdog();
-      busy = false;
-      lockUI(false);
-      executeControl(data.control);
-      showControlReply(data.control.reply);
+    // 服务端最多 150 秒规划 + 20 秒找歌，HTTP 留出 20 秒余量。
+    const { data } = await requestJson('chat', '/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input, mood, requestId, nowPlaying,
+        sleep: sleepEnd ? { remainingMin: Math.max(1, Math.ceil((sleepEnd - Date.now()) / 60000)) } : null }),
+    }, 190000);
+    if (!alive(gen) || data.requestId !== currentRequestId) return;
+    // 控制先执行；暂停门只管回复音频，否则“继续播放”也会被暂停。
+    if (data.ok && data.episode?.intent === 'control' && acceptEpisode(data.episode)) applyEpisodeAction(data.episode);
+    if (!alive(gen) || data.requestId !== currentRequestId) return;
+    if (!data.ok || data.control) acceptChatResponse(data);
+    else gated('chatResult', () => acceptChatResponse(data));
+  } catch {
+    if (!alive(gen) || currentRequestId !== requestId) return;
+    if (streamPending) {
+      if (streamPending && sayEnded) finishAfterSay(streamPending);
+      return;
     }
-    else if (data.ok && data.episode) {
-      if (data.streamed && streamingActive) {
-        streamPending = data.episode;
-        if (overlaying) {
-          // 口播已经在念（WS sayReady 先到了）：念完会用 streamPending 接歌；这里只在「已念完、在等歌」时补接，绝不重念
-          if (sayEnded) finishAfterSay(data.episode);
-        } else if (!wsAlive()) {
-          // WS 不通且口播还没开始 → 用 HTTP 拿到的 episode 自己念，绝不空等
-          streamingActive = false; enterEpisodeSmooth(data.episode);
-        }
-        // else：WS 通、口播还没开始 → 等 WS sayReady 触发；15 秒看门狗负责恢复
-      }
-      else if (live) enterEpisodeSmooth(data.episode);
-      else loadEpisode(data.episode);
-    }
-    else if (data.busy) { setState('稍候…'); busy = false; document.body.classList.remove('thinking'); setTimeout(() => chat(input, mood), 2500); return; }
-    else { setState('出错：' + (data.error || '?')); streamingActive = false; if (live) unduck(); }
-  } catch (e) { setState(e.name === 'AbortError' ? '15 秒内未响应，音乐继续' : '请求失败'); streamingActive = false; if (live) unduck(); }
-  finally { clearTimeout(requestTimer); busy = false; lockUI(false); document.body.classList.remove('thinking'); }
+    failChat('这次没等到回复，音乐继续');
+  } finally {
+    if (alive(gen)) { busy = false; lockUI(false); }
+  }
 }
-let emptyStreak = 0; // 连续拿到「无可播歌」的次数，防版权墙下紧密重试反复调用模型
+function acceptChatResponse(data) {
+  if (data.requestId !== currentRequestId) return;
+  if (data.ok && data.control) {
+    streamingActive = false; disarmWatchdog();
+    if (data.control.action === 'output') {
+      if (data.output?.ok) applyOutputResult(data.output);
+      showControlReply(data.control.reply);
+    } else {
+      const acted = executeControl(data.control);
+      showControlReply(acted || data.control.action !== 'favorite' ? data.control.reply : '现在没有在放歌，没法记。');
+    }
+    document.body.classList.remove('thinking');
+    reportEar('control', 'done', { action: data.control.action, clear: true });
+  } else if (data.ok && data.episode && acceptEpisode(data.episode)) {
+    streamPending = data.episode;
+    if (chatVoiceFailed || data.episode.voice?.status === 'skipped') {
+      chatVoiceFailed = true; failVoice();
+    } else if (sayEnded) finishAfterSay(data.episode);
+    else if (!voiceContext) {
+      const say = data.episode.queue?.find((q) => q.type === 'tts');
+      if (say) startChatVoice(say.url, say.text || data.episode.say);
+      else if (data.episode.voice?.status === 'pending' || data.streamed) {
+        showControlReply(data.episode.say);
+        if (laneStarting) skipChatVoice();
+        else armWatchdog(CHAT_VOICE_WAIT_MS, true);
+      }
+      else { showControlReply(data.episode.say); finishAfterSay(data.episode); }
+    }
+  } else {
+    failChat('这次没准备好，音乐继续');
+  }
+}
+function startChatVoice(url, text) {
+  if (!currentRequestId || chatVoiceFailed || chatVoiceUrl === url) return;
+  chatVoiceUrl = url;
+  startSayOverlay(url, text, () => streamPending);
+}
+
+let emptyStreak = 0;
+function holdEpisode(ep, id) {
+  pendingEpisode = { episode: ep, claimId: id, started: false };
+  claimId = id;
+  const claimed = pendingEpisode;
+  heldClaims.add(claimed);
+  later(() => {
+    if (claimed.started || claimed.released) return;
+    releaseClaim(claimed);
+    if (pendingEpisode === claimed) abandonPending();
+    if (!pendingEpisode) requestNext();
+  }, 15 * 60000, { automatic: false });
+  if (ep.voice?.status === 'pending') pollPendingVoice();
+  preloadPendingVoice();
+  gated('pendingEpisode', () => {
+    if (!soundingMusic() && !voiceContext) maybeEnterPending(0);
+    else onTimeUpdate();
+  });
+}
 async function requestNext() {
-  if (busy) return;
-  busy = true; lockUI(true); setState('准备下一首…');
+  if (paused) { pausedWork.set('claim', requestNext); return; }
+  if (stopped || sleepAfterTrack || pendingEpisode || claimTask || heldClaims.size) return;
+  clearTimeout(claimPoll); claimPoll = null;
+  if (!earOrigin) beginEar('next');
+  const gen = playbackGen;
+  const id = claimId ||= uuid();
+  const task = { claimId: id, serverGeneration };
+  claimTask = task;
   try {
-    const res = await fetch('/api/next');
-    const data = await res.json();
+    const { res, data } = await requestJson('claim', `/api/next?claimId=${encodeURIComponent(id)}`);
+    if (!alive(gen) || claimTask !== task || claimId !== id) {
+      if (task.serverGeneration === serverGeneration) releaseClaim({ claimId: id });
+      return;
+    }
+    observeEpoch(data.epoch ?? data.episode?.epoch, true);
     if (data.ok && data.episode) {
+      if (!acceptEpisode(data.episode)) { releaseClaim({ claimId: id }); claimId = null; scheduleClaim(0); return; }
+      data.episode.queue = (data.episode.queue || []).filter((q) => q.type !== 'song' || q.url);
       const songs = data.episode.queue.filter((q) => q.type === 'song').length;
       emptyStreak = songs ? 0 : emptyStreak + 1;
-      // 连续两期都没有可播的歌（多半撞版权墙）→ 停下不自动续，避免反复烧额度
-      if (!songs && emptyStreak >= 2) { setState('暂时找不到可播的歌，点 ▶ 或换个心情再试'); return; }
-      loadEpisode(data.episode);
+      if (!songs) {
+        releaseClaim({ claimId: id }); claimId = null;
+        setState('暂时找不到可播的歌，先听音乐');
+        scheduleClaim(Math.min(60000, 10000 * emptyStreak)); return;
+      }
+      claimRetry = 0;
+      holdEpisode(data.episode, id);
+      reportEar('next', 'ready');
+    } else if (res.status === 202 || data.busy) {
+      setState('节目准备中，先听音乐'); scheduleClaim(8000);
+    } else throw new Error('领取节目失败');
+  } catch {
+    if (!alive(gen) || claimTask !== task || claimId !== id) {
+      if (task.serverGeneration === serverGeneration) releaseClaim({ claimId: id });
+      return;
     }
-    else if (data.busy) { setState('稍候…'); busy = false; setTimeout(requestNext, 2500); return; }
-    else setState('出错：' + (data.error || '?'));
-  } catch (e) { setState('请求失败'); }
-  finally { busy = false; lockUI(false); }
+    setState('节目暂时没准备好，先听音乐');
+    if (!soundingMusic() && !voiceContext?.audible && !paused) ensureFiller();
+    scheduleClaim(Math.min(60000, 10000 * 2 ** claimRetry++));
+  } finally {
+    if (claimTask === task) {
+      claimTask = null;
+      if (!stopped && !pendingEpisode && !heldClaims.size && !claimPoll) scheduleClaim(8000);
+    }
+  }
 }
-function lockUI(on) { [el.nextBtn, el.sendBtn].forEach((b) => (b.disabled = on)); }
+function scheduleClaim(ms) {
+  clearTimeout(claimPoll);
+  claimPoll = later(() => { claimPoll = null; requestNext(); }, ms, { key: 'claimPoll' });
+}
+function preloadPendingVoice() {
+  const holder = pendingEpisode;
+  if (!holder || voiceContext || paused || streamingActive) return;
+  const tts = holder.episode.queue?.find((q) => q.type === 'tts');
+  if (holder.episode.voice?.status !== 'ready' && !tts) return;
+  if (tts) setVoiceSource(tts.url, { preload: true });
+}
+function applyPreparedVoice(holder, data) {
+  if (!holder || holder !== pendingEpisode || holder.episode.epoch < latestEpoch) return;
+  if (data.status === 'ready' && data.url) {
+    holder.episode.voice = { status: 'ready' };
+    holder.episode.queue = [{ type: 'tts', url: data.url, text: data.text || holder.episode.say },
+      ...holder.episode.queue.filter((q) => q.type !== 'tts')];
+    preloadPendingVoice();
+    gated('pendingVoice', () => { if (!soundingMusic()) maybeEnterPending(0); else onTimeUpdate(); });
+  } else if (data.status === 'skipped') {
+    holder.episode.voice = { status: 'skipped' };
+    clearTimeout(voicePoll);
+  }
+}
+function pollPendingVoice() {
+  clearTimeout(voicePoll);
+  const holder = pendingEpisode, gen = playbackGen;
+  if (!holder || holder.episode.voice?.status !== 'pending') return;
+  voicePoll = later(async () => {
+    try {
+      const { data } = await requestJson('voice', `/api/episode/${encodeURIComponent(holder.episode.id)}/voice`);
+      if (alive(gen)) applyPreparedVoice(holder, data);
+    } catch { /* WS 不通时继续按有限间隔查 */ }
+    if (alive(gen) && pendingEpisode === holder && holder.episode.voice?.status === 'pending') pollPendingVoice();
+  }, 8000, { key: 'voicePoll' });
+}
+function maybeEnterPending(remain = 0) {
+  if (paused || stopped || streamingActive || voiceContext || slots.get(idle)?.loading || !pendingEpisode) return;
+  const holder = pendingEpisode, ep = holder.episode;
+  if (!acceptEpisode(ep)) { abandonPending(); requestNext(); return; }
+  if (exclusiveSink?.uid) {
+    if (!soundingMusic() && remain <= 0) { pendingEpisode = null; claimId = null; loadEpisode(ep, holder); }
+    return;
+  }
+  const tts = ep.queue?.find((q) => q.type === 'tts');
+  if (ep.voice?.status === 'pending' && remain > 0) return;
+  if (tts && ep.voice?.status !== 'skipped' && (voice.readyState >= 3 || !slots.get(active)) && remain <= 8) {
+    startSayOverlay(tts.url, tts.text || ep.say, () => ep, holder);
+    return;
+  }
+  // 语音没有赶上尾声就放歌，迟到的 voiceReady 不再插入。
+  const first = ep.queue?.findIndex((q) => q.type === 'song') ?? -1;
+  const span = crossfadeDuration(slots.get(active)?.item?.meta, ep.queue?.[first]?.meta) / 1000;
+  if (remain > span || (tts && ep.voice?.status !== 'skipped' && remain > 0)) return;
+  pendingEpisode = null; claimId = null; clearTimeout(voicePoll);
+  ep.voice = { status: 'skipped' };
+  ep.queue = ep.queue.filter((q) => q.type !== 'tts');
+  logChat('claudio', ep.say); setState('语音离线，先放歌');
+  if (first >= 0) startMusic(ep.queue[0], 0, { episode: ep, holder });
+  else { releaseClaim(holder); continueRadio(); }
+}
+async function prefetchFiller() {
+  if (paused) { pausedWork.set('fillerPrefetch', prefetchFiller); return; }
+  if (fillerItem || fillerPromise || stopped) return fillerPromise;
+  const gen = playbackGen;
+  const promise = (async () => {
+    try {
+      const { data } = await requestJson('filler', `/api/filler?exclude=${recentFillers.join(',')}`, {}, 6500);
+      if (!alive(gen) || fillerPromise !== promise || !data.ok || data.item?.type !== 'song') return;
+      data.item.meta = { ...data.item.meta, discoveryType: 'filler' };
+      fillerItem = data.item;
+    } catch { /* 垫歌源暂不可用，后台继续重试 */ }
+    finally {
+      if (alive(gen) && fillerPromise === promise) {
+        fillerPromise = null;
+        if (!fillerItem) later(prefetchFiller, 10000, { key: 'fillerRetry' });
+      }
+    }
+  })();
+  fillerPromise = promise;
+  return promise;
+}
+async function ensureFiller() {
+  const gen = playbackGen;
+  if (paused || stopped || overlaying || voiceContext?.audible || slots.get(idle)?.loading || soundingMusic()) return;
+  if (!fillerItem) await prefetchFiller();
+  if (!alive(gen) || paused || stopped || overlaying || soundingMusic() || slots.get(idle)?.loading || voiceContext?.audible) return;
+  const item = fillerItem;
+  if (!item) { setState('正在找可播的音乐'); later(ensureFiller, 10000, { key: 'filler' }); return; }
+  fillerItem = null;
+  if (item.meta.id != null) recentFillers.push(String(item.meta.id));
+  if (recentFillers.length > 30) recentFillers.shift();
+  const ep = { id: `filler-${uuid()}`, epoch: latestEpoch, queue: [item], voice: { status: 'skipped' } };
+  if (exclusiveSink?.uid) loadEpisode(ep);
+  else startMusic(item, 0, { episode: ep, duration: 350 });
+  prefetchFiller();
+}
+function continueRadio() {
+  if (paused || stopped || switching || voiceContext?.audible) return;
+  if (pendingEpisode) { maybeEnterPending(0); if (voiceContext || slots.get(idle)?.loading) return; }
+  ensureFiller(); requestNext();
+}
+function lockUI(on) {
+  // 换歌和新问题始终可用，新请求负责取消旧请求。
+  el.nextBtn.disabled = false;
+}
 
 // ── 控件 ──
 // 注：前端本机播放是唯一播放层。后端遥控 / 镜像模式（/api/player/*）已随后端播放引擎一并废弃，相关死代码已整段删除。
+function fadeAll(ms, done) {
+  for (const track of mediaTracks) {
+    rampVolume(track, 0, ms, () => track.pause());
+    const env = envelopes.get(track);
+    if (env) env.pauseFade = true;
+  }
+  // 控件收尾独立于每轨包络；快速恢复时替换一轨包络也不会吞掉换歌。
+  if (done) later(done, ms, { automatic: false });
+}
+
 function resumePlayback() {
-  initAudio(); // 用户手势内激活 AudioContext（首播即起 FFT）
-  if (!queue.length) { started = true; setTimeout(() => chat(), 0); return; }
+  emptyStreak = 0;
+  initAudio();
+  // 刚打开、停过，或被别的设备接走过：先看服务端记的进度，有就接着放。
+  if (!started || stopped || remoteOwner) {
+    const gen = playbackGen;
+    started = true;
+    setState(remoteOwner ? `从 ${remoteOwner.deviceName} 接过来…` : '准备节目，先找音乐');
+    fetchHandoff().then((state) => {
+      if (gen !== playbackGen) return;
+      if (state?.song && resumeFromHandoff(state)) return;
+      remoteOwner = null;
+      startFresh();
+    });
+    return;
+  }
   started = true;
-  active.play().catch(() => {});
+  if (stopped) { startFresh(); return; }
+  const pauseDuration = pauseAt ? performance.now() - pauseAt : 0;
+  paused = false;
+  for (const env of envelopes.values()) env.start += pauseDuration;
+  if (musicFade) musicFade.start += pauseDuration;
+  if (voiceContext?.progressAt) voiceContext.progressAt += pauseDuration;
+  pauseAt = 0;
+  if (exclusiveSink?.uid) {
+    if (exclusiveTimer) {
+      exclusiveClock.paused = false;
+      fetch('/api/exclusive/control', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'resume' }),
+      }).catch(() => {});
+      exclusiveClock.emit('playing'); setPlayIcon(true);
+    }
+  } else {
+    for (const track of resumeTracks) {
+      envelopes.delete(track);
+      const target = resumeVolumes.get(track) ?? (track === voice ? sayVol() : musicTarget());
+      setTrackVol(track, 0);
+      const gen = playbackGen;
+      track.pause();
+      waitForPlaying(track, { signal: playbackController.signal, timeoutMs: mediaDeadline(track.src) }).then(() => {
+        if (alive(gen) && !paused) rampVolume(track, target, 300);
+        else track.pause();
+      }).catch(() => { if (alive(gen) && !paused && track === active) continueRadio(); });
+    }
+    setPlayIcon(true);
+  }
+  resumeTracks.clear(); resumeVolumes.clear();
+  const work = [...pausedWork.values()]; pausedWork.clear();
+  for (const fn of work) { if (paused || stopped) break; fn(); }
+  setState('正在播放');
+  refreshLyrics();
+  preloadPendingVoice(); prefetchFiller();
+  if (!soundingMusic() && !voiceContext && !slots.get(idle)?.loading) continueRadio();
+}
+function startFresh() {
+  newGeneration();
+  mediaTracks.forEach((track) => track.pause()); slots.clear(); envelopes.clear();
+  stopped = false; paused = false; started = true; emptyStreak = 0; pauseAt = 0;
+  setState('准备节目，先找音乐');
+  prefetchFiller(); requestNext();
+  firstStartTimer = later(() => { if (!soundingMusic() && !voiceContext?.audible) ensureFiller(); }, 2500, { key: 'firstStart' });
+}
+
+// ── 多设备接力（server/handoff.js）：上报放到哪；别的设备开始响就停；点播放从服务端记的进度接着放 ──
+const device = deviceIdentity();
+let remoteOwner = null; // 被别的设备接走时记下是谁
+async function fetchHandoff() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch('/api/playback', { signal: ctrl.signal });
+    const data = await res.json();
+    return data?.state || null;
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+// 只接歌，不接口播：换设备接着放不重念。
+function resumeFromHandoff(state) {
+  const items = [state.song, ...(state.queue || [])].filter((s) => s?.meta?.title && s.url)
+    .map((s) => ({ type: 'song', url: s.url, meta: { ...s.meta } }));
+  if (!items.length) return false;
+  items[0].handoff = true;
+  // 这台原来开着的那首（被别的设备接走前停在半截）不记成跳过：歌是换到别处接着听了。
+  for (const track of [musicA, musicB]) closeSongSession('handoff', track);
+  newGeneration();
+  mediaTracks.forEach((track) => track.pause()); slots.clear(); envelopes.clear();
+  stopped = false; paused = false; started = true; emptyStreak = 0; pauseAt = 0; remoteOwner = null;
+  const ep = { id: `handoff-${Date.now()}`, intent: 'recommend', say: '', queue: items, epoch: latestEpoch };
+  activeEpisode = ep; queue = items; idx = -1;
+  // 先占住：在响的那台马上停，不用等这边加载完才停（否则两边会同时响几秒）。
+  const position = Math.max(0, Number(state.position) || 0);
+  fetch('/api/playback', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: device.id, deviceName: device.name, playing: true, position,
+      song: { url: items[0].url, meta: items[0].meta }, queue: items.slice(1).map((q) => ({ url: q.url, meta: q.meta })) }),
+  }).catch(() => {});
+  el.queueCount.textContent = `${items.length} TRACKS`;
+  renderStream(ep);
   setPlayIcon(true);
-  setState('PLAYING');
+  startMusic(items[0], 0, { episode: ep, reason: 'skip', startAt: position });
+  return true;
+}
+function playbackSnapshot() {
+  const item = currentSongItem();
+  if (!item) return null;
+  const clock = displayedSongClock() || musicElementForItem(item);
+  const playing = Boolean(clock && !clock.paused && !isPlaybackPaused());
+  const at = queue.indexOf(item);
+  const rest = (at >= 0 ? queue.slice(at + 1) : []).filter((q) => q.type === 'song').slice(0, 6)
+    .map((q) => ({ url: q.meta?.remoteUrl || q.url, meta: q.meta }));
+  return { song: { url: item.meta?.remoteUrl || item.url, meta: item.meta }, position: Number(clock?.currentTime) || 0, playing, queue: rest };
+}
+let reportTimer = null, reportedAt = 0;
+function reportPlayback() {
+  clearTimeout(reportTimer); reportTimer = null; reportedAt = Date.now();
+  const snap = playbackSnapshot();
+  if (!snap || (remoteOwner && !snap.playing)) return;
+  if (snap.playing) remoteOwner = null;
+  fetch('/api/playback', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+    body: JSON.stringify({ deviceId: device.id, deviceName: device.name, ...snap }),
+  }).catch(() => {});
+}
+function reportPlaybackSoon() { clearTimeout(reportTimer); reportTimer = setTimeout(reportPlayback, 300); }
+// 每 5 秒报一次进度。挂在歌的 timeupdate 上：iPhone 锁屏时计时器会被推迟，播放进度事件还在走。
+function reportPlaybackTick() { if (Date.now() - reportedAt >= 5000 && playbackSnapshot()?.playing) reportPlayback(); }
+setInterval(reportPlaybackTick, 5000);
+// 打开时别的设备正在放：先告诉听众，点播放就接过来。
+fetchHandoff().then((state) => {
+  if (!started && state?.playing && state.deviceId !== device.id) onHandoff(state);
+});
+function onHandoff(msg) {
+  if (!msg.deviceId || msg.deviceId === device.id) return;
+  remoteOwner = { deviceId: msg.deviceId, deviceName: msg.deviceName || '另一台设备' };
+  if (started && !stopped && !paused) pausePlayback();
+  setState(`正在 ${remoteOwner.deviceName} 上播放`);
 }
 
+let pauseAt = 0;
+const resumeTracks = new Set(), resumeVolumes = new Map();
 function pausePlayback() {
-  active.pause();
-  setPlayIcon(false);
-  setState('PAUSED');
+  if (paused || stopped) return;
+  applyEnvelopes(); paused = true; pauseAt = performance.now();
+  resumeTracks.clear(); resumeVolumes.clear();
+  for (const [track, slot] of slots) {
+    if (!slot.loading) continue;
+    slot.controller?.abort(); track.pause(); slots.delete(track);
+    pausedWork.set('music', slot.resume);
+  }
+  if (voiceContext && !voiceContext.audible && !exclusiveSink?.uid) {
+    const ctx = voiceContext;
+    sayOnEnd?.abort(); voice.pause(); envelopes.delete(voice); voiceContext = null;
+    pausedWork.set('say', () => startSayOverlay(ctx.url, ctx.text, ctx.getEpisode, ctx.holder));
+  }
+  if (exclusiveSink?.uid) {
+    exclusiveClock.paused = true;
+    fetch('/api/exclusive/control', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'pause' }),
+    }).catch(() => {});
+  } else {
+    for (const track of mediaTracks) {
+      if (!track.paused && !track.ended) {
+        resumeTracks.add(track); resumeVolumes.set(track, track === voice ? sayVol() : musicTarget());
+      }
+    }
+    fadeAll(250);
+  }
+  setPlayIcon(false); setState('已暂停');
+  lyricClock.refresh();
 }
-
-function previousPlayback() {
-  if (queue.length) playIndex(Math.max(0, idx - 1));
+function switchByUser(target) {
+  newGeneration(); initAudio();
+  if (exclusiveSink?.uid) stopExclusiveClient();
+  stopped = false; started = true; switching = true;
+  const gen = playbackGen;
+  for (const track of [musicA, musicB]) closeSongSession('skip', track);
+  fadeAll(350, () => {
+    if (!alive(gen)) return;
+    switching = false;
+    if (paused) { pausedWork.set('advance', () => playIndex(target)); return; }
+    if (target < queue.length) playIndex(Math.max(0, target), { reason: 'skip', duration: 350 });
+    else { emptyStreak = 0; continueRadio(); }
+  });
 }
-
-function nextPlayback() {
-  if (idx + 1 < queue.length) playIndex(idx + 1);
-  else { closeSongSession('skip'); setTimeout(requestNext, 0); }
-}
-
+function previousPlayback() { switchByUser(Math.max(0, idx - 1)); }
+function nextPlayback() { switchByUser(idx + 1); }
 function stopPlayback() {
-  clearTimeout(sleepTimer); clearInterval(sleepBadgeTimer); sleepEnd = null; updateSleepBadge();
-  // 清掉所有流式/叠加/duck/看门狗残留态：停了之后即使迟到的 sayReady/episode 到达，也不会把已停的歌恢复
-  disarmWatchdog();
-  cancelBlend();
-  streamingActive = false; streamPending = null; ducked = false; overlaying = false;
-  if (sayOnEnd) sayOnEnd.abort();
-  closeSongSession('skip');
-  active.pause(); idle.pause(); setPlayIcon(false); setState('STOPPED');
+  newGeneration();
+  stopped = true; paused = false; started = false;
+  cancelSubtitle(); lyricClock.refresh();
+  resumeTracks.clear(); resumeVolumes.clear();
+  clearSleep();
+  fetch('/api/sleep', { method: 'POST' }).catch(() => {}); // 停了就让后台别再备节目，下次开播自动恢复
+  for (const track of [musicA, musicB]) closeSongSession('skip', track);
+  if (exclusiveSink?.uid) stopExclusiveClient();
+  fadeAll(400, () => { slots.clear(); setPlayIcon(false); setState('已停止'); });
+  setPlayIcon(false); document.body.classList.remove('thinking');
   el.barFill.style.width = '0';
 }
-
 function dislikeCurrent() {
-  const item = queue[idx];
-  if (!item || item.type !== 'song') return;
+  const item = currentSongItem();
+  if (item?.type !== 'song') return;
   const song = { title: item.meta.title, artist: item.meta.artist };
-  closeSongSession('dislike');
   reportListeningEvent('dislike', { song, discoveryType: item.meta.discoveryType, source: 'button' });
   el.dislikeBtn.classList.add('dislike-on');
-  setState('记住了，以后少放这类');
-  setTimeout(() => {
-    if (idx + 1 < queue.length) playIndex(idx + 1);
-    else requestNext();
-  }, 260);
+  nextPlayback(); setState('记住了，以后不放这首。');
 }
 
 function favoriteCurrent({ toggle = false } = {}) {
-  const item = queue[idx];
-  if (!item || item.type !== 'song') return;
+  const item = currentSongItem();
+  if (!item || item.type !== 'song') return false;
   const k = songKey(item.meta);
   if (toggle && favs.has(k)) favs.delete(k); else favs.add(k);
-  el.favBtn.classList.toggle('fav-on', favs.has(k));
-  el.favBtn.textContent = favs.has(k) ? '♥' : '♡';
-  if (favs.has(k)) { el.favBtn.classList.remove('fav-pulse'); void el.favBtn.offsetWidth; el.favBtn.classList.add('fav-pulse'); } // 收藏瞬间心跳
+  paintHeart(el.favBtn, favs.has(k), { pulse: true }); // 收藏瞬间心跳
   localStorage.setItem('claudio-favs', JSON.stringify([...favs]));
-  if (favs.has(k)) {
-    fetch('/api/fav', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: item.meta.title, artist: item.meta.artist }),
-    }).catch(() => {});
-  }
+  fetch('/api/fav', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: item.meta.title, artist: item.meta.artist, ...(!favs.has(k) ? { remove: true } : {}) }),
+  }).catch(() => {});
+  return true;
 }
 
 function setMasterVolume(percent) {
   const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  const previous = masterVol;
   masterVol = value / 100;
+  const scale = previous ? masterVol / previous : 0;
+  for (const env of envelopes.values()) { env.from = env.fromRatio * masterVol; env.to = env.toRatio * masterVol; }
+  for (const track of mediaTracks) {
+    const target = track === voice ? sayVol() : musicTarget();
+    setTrackVol(track, previous ? trackVol(track) * scale : (stopped || paused || track.paused ? 0 : target));
+  }
+  for (const [track, volume] of resumeVolumes) resumeVolumes.set(track, previous ? volume * scale : (track === voice ? sayVol() : musicTarget()));
   el.vol.value = String(value);
-  if (!crossing && !ducked && !overlaying) setTrackVol(active, activeTargetVol());
-  setState(`VOLUME ${Math.round(value)}%`);
+  el.vol.style.setProperty('--v', `${value}%`); // 滑条左半段的填充
+  if (exclusiveSink?.uid) {
+    fetch('/api/exclusive/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'volume', value: masterVol }),
+    }).catch(() => {});
+  }
+  applyEnvelopes();
+  setState(`音量 ${Math.round(value)}%`);
 }
 
 function executeControl(control) {
@@ -1183,13 +2205,24 @@ function applyEpisodeAction(ep) {
 
 function showControlReply(text) {
   if (!text) return;
-  el.stream.innerHTML = `<div class="line active enter"><span class="who">Claudio</span><div class="bubble">${escapeHtml(text)}</div></div>`;
+  logChat('claudio', text);
+  if (queue[idx]?.type === 'song') return; // 正在放歌：回复只进对话条，大屏留给歌词（顶掉了就要等下一期才回来）
+  clearStageView();
+  el.stream.innerHTML = BUBBLE_LINE;
+  renderStatic(el.stream.querySelector('.bubble'), text);
+  el.stream.scrollTop = 0;
 }
 
 el.playBtn.addEventListener('click', () => {
-  if (!started || !queue.length || active.paused) resumePlayback();
+  if (!started || !queue.length || isPlaybackPaused()) resumePlayback();
   else pausePlayback();
 });
+if (navigator.mediaSession?.setActionHandler) {
+  for (const [action, handler] of Object.entries({ play: resumePlayback, pause: pausePlayback,
+    nexttrack: nextPlayback, previoustrack: previousPlayback, stop: stopPlayback })) {
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* 旧 WebKit 只支持部分动作 */ }
+  }
+}
 el.prevBtn.addEventListener('click', previousPlayback);
 el.nextBtn.addEventListener('click', nextPlayback);
 el.stopBtn.addEventListener('click', stopPlayback);
@@ -1201,109 +2234,456 @@ el.vol.addEventListener('input', () => setMasterVolume(+el.vol.value));
 if (el.airplayBtn) {
   if (!AIRPLAY_MODE.visible) {
     el.airplayBtn.style.display = 'none';
+  } else if (AIRPLAY_MODE.outputMenu) {
+    // 设备菜单靠 macOS 的音频系统；服务跑在 Linux 盒子上时不显示。
+    el.airplayBtn.style.display = 'none';
+    fetch('/api/status').then((res) => res.json()).catch(() => ({})).then((status) => {
+      if (status?.features?.outputs === false) return;
+      el.airplayBtn.style.display = '';
+      setupOutputMenu();
+    });
   } else if (AIRPLAY_MODE.webkitPicker) {
     el.airplayBtn.addEventListener('click', () => {
       try { active.webkitShowPlaybackTargetPicker(); } catch (e) { console.warn('[airplay]', e && e.message); }
     });
-    [trackA, trackB].forEach((t) => t.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', () => {
+    [musicA, musicB].forEach((t) => t.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', () => {
       if (t === active) el.airplayBtn.classList.toggle('casting', !!t.webkitCurrentPlaybackTargetIsWireless);
     }));
   }
 }
+
+function setupOutputMenu() {
+  const menu = document.createElement('div');
+  menu.className = 'output-menu hidden';
+  menu.id = 'outputMenu';
+  menu.setAttribute('role', 'menu');
+  document.body.appendChild(menu);
+  const place = () => {
+    const rect = el.airplayBtn.getBoundingClientRect();
+    // 按钮在窗口下半部，下面放不下就翻到按钮上方
+    const flip = rect.bottom + 8 + menu.offsetHeight > innerHeight && rect.top - 8 - menu.offsetHeight > 8;
+    menu.style.top = `${Math.round(flip ? rect.top - 8 - menu.offsetHeight : rect.bottom + 8)}px`;
+    menu.style.left = `${Math.max(8, Math.round(rect.right - menu.offsetWidth))}px`;
+  };
+  const close = () => { menu.classList.add('hidden'); idleHider.refresh(); };
+  const paint = (data, { pending = '', error = '' } = {}) => {
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const selected = items.find((item) => item.selected && item.kind === 'airplay');
+    el.airplayBtn.classList.toggle('casting', Boolean(selected));
+    menu.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'output-note';
+      empty.textContent = error || '没有找到播放设备';
+      menu.appendChild(empty);
+    }
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'output-row';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `output-item${item.selected ? ' selected' : ''}`;
+      button.innerHTML = `<span>${escapeHtml(item.name)}</span><small>${escapeHtml(item.detail || '')}</small>`;
+      button.addEventListener('click', () => chooseOutput(item.id));
+      const rename = document.createElement('button');
+      rename.type = 'button';
+      rename.className = 'output-rename';
+      rename.textContent = '改名';
+      rename.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const alias = window.prompt('给这台设备起个房间名，例如客厅。留空则恢复原名。', item.alias || '');
+        if (alias == null) return;
+        try {
+          const res = await fetch('/api/outputs/alias', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: item.id, alias }),
+          });
+          const saved = await res.json();
+          if (!saved.ok) {
+            paint(menu._data, { error: saved.error || '没能改名' });
+            return;
+          }
+        } catch {
+          paint(menu._data, { error: '没能改名' });
+          return;
+        }
+        open();
+      });
+      row.append(button, rename);
+      menu.appendChild(row);
+    }
+    const bluetooth = document.createElement('button');
+    bluetooth.type = 'button'; bluetooth.className = 'output-item'; bluetooth.textContent = '蓝牙…';
+    bluetooth.addEventListener('click', async () => {
+      try {
+        const data = await (await fetch('/api/outputs/bluetooth-settings', { method: 'POST' })).json();
+        if (!data.ok) paint(menu._data, { error: '没能打开蓝牙设置' });
+      } catch { paint(menu._data, { error: '没能打开蓝牙设置' }); }
+    });
+    menu.appendChild(bluetooth);
+    if (pending || error || data?.note) {
+      const note = document.createElement('div');
+      note.className = 'output-note';
+      note.textContent = pending || error || data.note;
+      menu.appendChild(note);
+    }
+    place();
+  };
+  chooseOutput = async (id) => {
+    const gen = newGeneration();
+    voice.pause();
+    for (const track of [musicA, musicB]) rampVolume(track, paused ? 0 : songVol(), 300);
+    paint(menu._data, { pending: '正在切换…' });
+    try {
+      const res = await fetch('/api/outputs', {
+        signal: playbackController.signal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const data = await res.json();
+      if (!alive(gen)) return;
+      if (!data.ok) paint(menu._data, { error: data.error || '没能切换' });
+      else {
+        menu._data = data;
+        applyOutputResult(data);
+        paint(data);
+      }
+    } catch {
+      paint(menu._data, { error: '没能切换播放设备' });
+    }
+  };
+  const open = async () => {
+    menu.classList.remove('hidden');
+    idleHider.refresh();
+    place();
+    paint(menu._data, { pending: '正在找音箱…' });
+    try {
+      const res = await fetch('/api/outputs');
+      const data = await res.json();
+      menu._data = data;
+      paint(data, { error: data.ok === false ? (data.error || '没有找到播放设备') : '' });
+    } catch {
+      paint(null, { error: '没有找到播放设备' });
+    }
+  };
+  el.airplayBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (menu.classList.contains('hidden')) open();
+    else close();
+  });
+  document.addEventListener('click', (event) => {
+    if (!menu.contains(event.target) && event.target !== el.airplayBtn) close();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !menu.classList.contains('hidden')) {
+      event.preventDefault(); close();
+    }
+  });
+  window.addEventListener('resize', () => { if (!menu.classList.contains('hidden')) place(); });
+}
 el.sendBtn.addEventListener('click', () => {
   const v = el.moodInput.value.trim(); if (!v) return; el.moodInput.value = '';
+  logChat('user', v);
   chat(v);
 });
-el.moodInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.sendBtn.click(); });
+let voiceRecorder = null;
+let voiceChunks = [];
+let voiceStopTimer = null;
+function voiceMime() {
+  if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+  return ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((type) => MediaRecorder.isTypeSupported(type)) || '';
+}
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      resolve(text.includes(',') ? text.slice(text.indexOf(',') + 1) : text);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+async function toggleVoice() {
+  if (voiceRecorder && voiceRecorder.state === 'recording') {
+    voiceRecorder.stop();
+    return;
+  }
+  const recordingGen = playbackGen;
+  const recordingSignal = playbackController.signal;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setState('这台设备录不了音');
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+  } catch {
+    setState('需要允许麦克风');
+    return;
+  }
+  const mime = voiceMime();
+  voiceChunks = [];
+  try {
+    voiceRecorder = mime ? new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 16000 }) : new MediaRecorder(stream, { audioBitsPerSecond: 16000 }); // 办公室上行限速，一句话压到十几 KB
+  } catch {
+    stream.getTracks().forEach((track) => track.stop());
+    setState('这台设备录不了音');
+    return;
+  }
+  el.voiceBtn.classList.add('voice-on');
+  setState('在听，再说一句，点一下送出');
+  voiceRecorder.addEventListener('dataavailable', (event) => {
+    if (event.data && event.data.size) voiceChunks.push(event.data);
+  });
+  voiceRecorder.addEventListener('stop', async () => {
+    clearTimeout(voiceStopTimer);
+    el.voiceBtn.classList.remove('voice-on');
+    stream.getTracks().forEach((track) => track.stop());
+    if (!alive(recordingGen)) { voiceRecorder = null; return; }
+    const blob = new Blob(voiceChunks, { type: voiceRecorder.mimeType || mime || 'audio/webm' });
+    voiceRecorder = null;
+    if (blob.size < 800) {
+      setState('没听清，再说一次');
+      return;
+    }
+    setState('在听写…');
+    try {
+      const audioBase64 = await blobToBase64(blob);
+      if (!alive(recordingGen)) return;
+      const res = await fetch('/api/voice', {
+        signal: recordingSignal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioBase64, mime: blob.type }),
+      });
+      const data = await res.json();
+      if (!alive(recordingGen)) return;
+      if (!data.ok || !data.text) {
+        setState(data.error || '没听清，再说一次');
+        return;
+      }
+      el.moodInput.value = '';
+      logChat('user', data.text);
+      chat(data.text);
+    } catch {
+      if (alive(recordingGen)) setState('没听清，再说一次');
+    }
+  });
+  voiceRecorder.start();
+  clearTimeout(voiceStopTimer);
+  voiceStopTimer = setTimeout(() => {
+    if (voiceRecorder && voiceRecorder.state === 'recording') voiceRecorder.stop();
+  }, 20000);
+}
+if (el.voiceBtn) el.voiceBtn.addEventListener('click', () => { toggleVoice().catch(() => setState('需要允许麦克风')); });
+onEnter(el.moodInput, () => el.sendBtn.click());
 el.bar.addEventListener('click', (e) => {
-  if (overlaying) return; // 口播叠加期 active 是旧歌，seek 会跳错对象
+  if (overlaying || exclusiveSink?.uid) return; // 口播叠加期 active 是旧歌；音箱播放不跟网页进度条跳
   if (!isFinite(active.duration)) return;
-  const r = el.bar.getBoundingClientRect();
-  active.currentTime = ((e.clientX - r.left) / r.width) * active.duration;
+  active.currentTime = seekFraction(el.bar, e) * active.duration;
+  refreshLyrics();
 });
 const songKey = (m) => `${m.title}|${m.artist}`;
 
 // ── 睡眠定时（到点淡出停止 + 晚安）──
 // 可见反馈：开=高亮 class + 右上角剩余分钟徽标。emoji 的 color 改不动（旧版「按了没反应」的根因），必须靠 class/徽标。
 function updateSleepBadge() {
-  const on = !!sleepEnd;
+  const on = Boolean(sleepEnd || sleepAfterTrack);
   el.sleepBtn.classList.toggle('sleep-on', on);
-  if (on) {
+  if (sleepEnd) {
     const rem = Math.max(1, Math.ceil((sleepEnd - Date.now()) / 60000));
     el.sleepBadge.textContent = String(rem);
-    el.sleepBtn.title = `睡眠定时 · 剩 ${rem} 分钟，点击取消`;
+    el.sleepBtn.title = `睡眠定时 · 剩 ${rem} 分钟`;
   } else {
     el.sleepBadge.textContent = '';
-    el.sleepBtn.title = `睡眠定时 ${SLEEP_MIN} 分钟`;
+    el.sleepBtn.title = sleepAfterTrack ? '睡眠定时 · 放完这首' : '睡眠定时';
   }
 }
-function fadeOutStop() {
-  sleepEnd = null;
-  clearInterval(sleepBadgeTimer);
+function saveSleep() {
+  try {
+    if (sleepEnd) localStorage.setItem(SLEEP_KEY, String(sleepEnd));
+    else localStorage.removeItem(SLEEP_KEY);
+  } catch {}
+}
+function clearSleep() {
+  sleepEnd = null; sleepAfterTrack = false;
+  clearTimeout(sleepTimer); clearInterval(sleepBadgeTimer);
+  saveSleep(); updateSleepBadge();
+}
+function armSleep(end) {
+  clearSleep();
+  sleepEnd = end; saveSleep();
+  sleepTimer = setTimeout(checkSleep, Math.max(0, end - Date.now()));
+  sleepBadgeTimer = setInterval(() => { if (!checkSleep()) updateSleepBadge(); }, 30000);
   updateSleepBadge();
-  const t = active; // 捕获当前轨，防淡出途中 swap 写到错误轨道
-  rampVolume(t, 0, 8000, () => { t.pause(); idle.pause(); setPlayIcon(false); setState('晚安 🌙'); });
 }
-el.sleepBtn.addEventListener('click', () => {
-  if (sleepEnd) {
-    sleepEnd = null; clearTimeout(sleepTimer); clearInterval(sleepBadgeTimer);
-    updateSleepBadge(); setState('已取消睡眠定时');
-  } else {
-    sleepEnd = Date.now() + SLEEP_MIN * 60000;
-    clearTimeout(sleepTimer);
-    sleepTimer = setTimeout(fadeOutStop, SLEEP_MIN * 60000);
-    clearInterval(sleepBadgeTimer);
-    sleepBadgeTimer = setInterval(updateSleepBadge, 30000); // 每 30s 刷新剩余分钟徽标
-    updateSleepBadge();
-    setState(`😴 睡眠定时 ${SLEEP_MIN} 分钟`);
-    started = true; chat();
-  }
-});
+function checkSleep() {
+  if (!sleepEnd || Date.now() < sleepEnd) return false;
+  fadeOutStop();
+  return true;
+}
+// 到点：淡出停播，退回已领的节目，并让后台别再备节目、别再合成口播。
+function fadeOutStop(ms = SLEEP_FADE_MS) {
+  clearSleep();
+  fetch('/api/sleep', { method: 'POST' }).catch(() => {});
+  if (stopped) return;
+  newGeneration(); stopped = true; paused = false; started = false;
+  lyricClock.refresh();
+  if (exclusiveSink?.uid) { stopExclusiveClient(); setPlayIcon(false); setState('晚安'); return; }
+  for (const track of [musicA, musicB]) closeSongSession('completed', track);
+  fadeAll(ms, () => { setPlayIcon(false); setState('晚安'); });
+}
 
-// ── 大波形（时钟区，跟随播放丝滑波动 + 发光）──
-const wctx = el.waveBig.getContext('2d');
-function rs() { el.waveBig.width = el.waveBig.clientWidth * devicePixelRatio; el.waveBig.height = el.waveBig.clientHeight * devicePixelRatio; }
-rs(); addEventListener('resize', rs);
-const BARS = 60;
-const hs = Array.from({ length: BARS }, () => 0.06);
-const targets = hs.slice();
-function drawWave() {
-  const w = el.waveBig.width, h = el.waveBig.height, bw = w / BARS;
-  wctx.clearRect(0, 0, w, h);
+function setupSleepMenu() {
+  const menu = document.createElement('div');
+  menu.className = 'output-menu hidden';
+  menu.setAttribute('role', 'menu');
+  document.body.appendChild(menu);
+  const close = () => { menu.classList.add('hidden'); idleHider.refresh(); };
+  const place = () => {
+    const rect = el.sleepBtn.getBoundingClientRect();
+    const flip = rect.bottom + 8 + menu.offsetHeight > innerHeight && rect.top - 8 - menu.offsetHeight > 8;
+    menu.style.top = `${Math.round(flip ? rect.top - 8 - menu.offsetHeight : rect.bottom + 8)}px`;
+    menu.style.left = `${Math.max(8, Math.round(rect.right - menu.offsetWidth))}px`;
+  };
+  const item = (label, onPick, selected = false) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `output-item${selected ? ' selected' : ''}`;
+    button.setAttribute('role', 'menuitem');
+    button.textContent = label;
+    button.addEventListener('click', () => { close(); onPick(); });
+    menu.appendChild(button);
+  };
+  const open = () => {
+    menu.innerHTML = '';
+    for (const min of SLEEP_CHOICES) {
+      item(`${min} 分钟`, () => {
+        armSleep(Date.now() + min * 60000);
+        setState(`${min} 分钟后停`);
+        if (!started || stopped) { started = true; chat(); }
+      });
+    }
+    item('放完这首', () => {
+      clearSleep(); sleepAfterTrack = true; updateSleepBadge();
+      setState('放完这首就停');
+    }, sleepAfterTrack);
+    if (sleepEnd || sleepAfterTrack) item('取消定时', () => { clearSleep(); setState('已取消睡眠定时'); });
+    menu.classList.remove('hidden');
+    idleHider.refresh();
+    place();
+  };
+  el.sleepBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (menu.classList.contains('hidden')) open();
+    else close();
+  });
+  document.addEventListener('click', (event) => {
+    if (!menu.contains(event.target) && !el.sleepBtn.contains(event.target)) close();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !menu.classList.contains('hidden')) { event.preventDefault(); close(); }
+  });
+  window.addEventListener('resize', () => { if (!menu.classList.contains('hidden')) place(); });
+}
+setupSleepMenu();
+try {
+  const saved = Number(localStorage.getItem(SLEEP_KEY));
+  if (saved > Date.now() + 1000) armSleep(saved);
+  else localStorage.removeItem(SLEEP_KEY);
+} catch {}
+
+// ── 点阵电平（舞台右上角）：歌曲和口播共用。优先读 WebAudio 真频谱，拿不到就按音量拟态 ──
+const meterCtx = el.meter.getContext('2d');
+const METER_PITCH = 5; // 点距（CSS px）
+let meterColors = { lit: '#f2f2f2', peak: '#d71921' };
+let meterLevels = [];
+let meterStill = false; // 已经画过一帧静止画面，空闲时不再重画
+function readMeterColors() {
   const css = getComputedStyle(document.documentElement);
-  const col = css.getPropertyValue('--accent').trim() || '#00e08a';
-  // 真频谱优先：WebAudio AnalyserNode（同源代理后才有数据）；否则退回音量驱动的拟态波形
-  const playing = !active.paused && active.src && active.readyState > 2 && !active.ended;
-  let live = false;
-  if (analyser && playing) {
+  meterColors = {
+    lit: css.getPropertyValue('--fg').trim() || '#f2f2f2',
+    peak: css.getPropertyValue('--red').trim() || '#d71921',
+  };
+  meterStill = false;
+}
+function sizeMeter() {
+  const dpr = devicePixelRatio || 1;
+  const w = Math.round(el.meter.clientWidth * dpr);
+  const h = Math.round(el.meter.clientHeight * dpr);
+  if (el.meter.width === w && el.meter.height === h) return;
+  el.meter.width = w;
+  el.meter.height = h;
+  meterStill = false;
+}
+new ResizeObserver(sizeMeter).observe(el.meter);
+sizeMeter();
+readMeterColors();
+
+function meterTargets(cols) {
+  const targets = new Array(cols).fill(0);
+  const tracks = mediaTracks.filter((t) => !t.paused && t.src && t.readyState > 2 && !t.ended);
+  const sounding = tracks.length > 0 || Boolean(exclusiveSink?.uid && !exclusiveClock.paused);
+  if (analyser && tracks.length) {
     analyser.getByteFrequencyData(freqData);
-    live = true;
     const span = freqData.length * 0.7; // 取低~中频段（能量集中区），右端不至于死寂
-    for (let i = 0; i < BARS; i++) targets[i] = Math.max(0.012, freqData[Math.floor((i / BARS) * span)] / 255);
-  } else {
-    const amp = playing ? Math.max(0, Math.min(1, trackVol(active))) : 0;
+    for (let i = 0; i < cols; i++) targets[i] = Math.min(1, (freqData[Math.floor((i / cols) * span)] / 255) * 1.25);
+  } else if (sounding) {
+    const amp = Math.min(1, tracks.length ? Math.max(...tracks.map(trackVol)) : masterVol);
     const t = performance.now();
-    for (let i = 0; i < BARS; i++) {
-      if (amp > 0.012) {
-        const shape = (1 - i / BARS) * 0.65 + 0.35; // 低频(左)大、高频(右)小
-        const wob = 0.35 + 0.65 * Math.abs(Math.sin(t / (170 + i * 7) + i * 0.7));
-        targets[i] = amp * shape * wob * (0.65 + Math.random() * 0.35);
-      } else {
-        targets[i] = 0.012; // 静音：基本静止
-      }
+    for (let i = 0; i < cols; i++) {
+      const shape = (1 - i / cols) * 0.65 + 0.35; // 低频(左)大、高频(右)小
+      const wob = 0.35 + 0.65 * Math.abs(Math.sin(t / (170 + i * 7) + i * 0.7));
+      targets[i] = amp * shape * wob * (0.65 + Math.random() * 0.35);
     }
   }
-  for (let i = 0; i < BARS; i++) {
-    hs[i] += (targets[i] - hs[i]) * 0.25;
-    const bh = Math.max(1.5 * devicePixelRatio, hs[i] * h * 0.92);
-    wctx.fillStyle = col;
-    wctx.shadowColor = col; wctx.shadowBlur = (live || hs[i] > 0.02) ? 7 : 0;
-    wctx.fillRect(i * bw + bw * 0.28, (h - bh) / 2, bw * 0.44, bh);
-  }
-  wctx.shadowBlur = 0;
-  requestAnimationFrame(drawWave);
+  return { targets, sounding };
 }
-drawWave();
+function drawMeter() {
+  requestAnimationFrame(drawMeter);
+  if (document.hidden) return;
+  const w = el.meter.width, h = el.meter.height;
+  if (!w || !h) return;
+  const pitch = METER_PITCH * (devicePixelRatio || 1);
+  const cols = Math.max(1, Math.floor(w / pitch));
+  const rows = Math.max(1, Math.floor(h / pitch));
+  if (meterLevels.length !== cols) { meterLevels = new Array(cols).fill(0); meterStill = false; }
+  const { targets, sounding } = meterTargets(cols);
+  // 思考中、还没出声：底行一颗红点来回扫（Nothing Glyph 的味道）
+  const thinking = !sounding && document.body.classList.contains('thinking');
+  const sweep = Math.floor(performance.now() / 70) % Math.max(1, 2 * cols - 2);
+  const scanCol = thinking ? (sweep < cols ? sweep : 2 * cols - 2 - sweep) : -1;
+  const resting = !sounding && !thinking && meterLevels.every((v) => v < 0.02);
+  if (resting && meterStill) return;
+  meterStill = resting;
+
+  const dim = new Path2D(), lit = new Path2D(), peak = new Path2D();
+  const radius = pitch * 0.26;
+  const ox = (w - cols * pitch) / 2, oy = (h - rows * pitch) / 2;
+  for (let c = 0; c < cols; c++) {
+    meterLevels[c] += (targets[c] - meterLevels[c]) * 0.28;
+    const on = Math.round(meterLevels[c] * rows);
+    for (let r = 0; r < rows; r++) { // r = 0 是最底下一行
+      const x = ox + (c + 0.5) * pitch, y = oy + (rows - r - 0.5) * pitch;
+      const path = (r === 0 && c === scanCol) ? peak : r < on ? (r === on - 1 ? peak : lit) : dim;
+      path.moveTo(x + radius, y);
+      path.arc(x, y, radius, 0, Math.PI * 2);
+    }
+  }
+  meterCtx.clearRect(0, 0, w, h);
+  meterCtx.fillStyle = meterColors.lit;
+  meterCtx.globalAlpha = 0.14;
+  meterCtx.fill(dim);
+  meterCtx.globalAlpha = 0.9;
+  meterCtx.fill(lit);
+  meterCtx.globalAlpha = 1;
+  meterCtx.fillStyle = meterColors.peak;
+  meterCtx.fill(peak);
+}
+drawMeter();
 
 // ── WS（带断线指数退避重连）──
 let ws = null;
@@ -1312,37 +2692,129 @@ function wsAlive() { return ws && ws.readyState === WebSocket.OPEN; }
 
 function setConn(ok) {
   el.connState.textContent = ok ? 'CONNECTED' : 'OFFLINE';
-  el.liveTag.textContent = ok ? 'LIVE' : 'OFFLINE';
+  el.liveTag.textContent = ok ? 'ON AIR' : 'OFFLINE';
   el.liveTag.classList.toggle('on', ok);
   el.connMsg.textContent = ok ? 'Connected to Claudio server' : 'Disconnected';
 }
 
-function handleWS(e) {
-  let msg; try { msg = JSON.parse(e.data); } catch { return; }
-  if (msg.kind === 'nextReady' && started) el.connMsg.textContent = 'Next episode ready';
-  // 流式：口播先到 → 在背景歌上念；歌随后到 → 念完接上
-  if (msg.kind === 'sayReady' && msg.url && streamingActive) {
-    setState('THINKING…→ 念口播');
-    startSayOverlay(msg.url, msg.say, () => streamPending);
-  }
-  if (msg.kind === 'episode' && streamingActive && msg.episode) {
-    streamPending = msg.episode;
-    if (sayEnded) finishAfterSay(msg.episode); // 口播已念完，立即接歌
-  }
-  if (msg.kind === 'ttsError') {
-    setState('Fish 语音失败，音乐继续');
-    el.connMsg.textContent = 'Fish Audio 暂时不可用（未切换本地语音）';
-  }
-  if (msg.kind === 'scheduled' && msg.episode) {
-    const labels = { 'morning-plan': '☀️ 清晨节目', 'morning-show': '🌤 早间节目', 'hourly-mood': '🎚 整点更新' };
-    el.connMsg.textContent = (labels[msg.reason] || '定时节目') + '已就绪';
-    // 叠加(overlaying)/交叉(crossing)期不被定时打断；正在听才平滑切入，没在听只提示（autoplay 需手势）
-    if (started && !overlaying && !crossing && active.src && !active.paused && !active.ended) enterEpisodeSmooth(msg.episode);
+function applyLyrics(msg) {
+  const tracks = Array.isArray(msg.tracks) ? msg.tracks : [];
+  if (!tracks.length || !msg.id) return;
+  const patch = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const track of tracks) {
+      for (const item of list) {
+        if (item?.type === 'song' && item.meta?.title === track.title && item.meta?.artist === track.artist) {
+          item.meta.lyric = track.lyric || '';
+        }
+      }
+    }
+  };
+  if (streamPending?.id === msg.id) patch(streamPending.queue);
+  if (pendingEpisode?.episode.id === msg.id) patch(pendingEpisode.episode.queue);
+  if (activeEpisode?.id === msg.id) {
+    patch(activeEpisode.queue);
+    if (queue !== activeEpisode.queue) patch(queue);
+    const current = displayedSong;
+    const match = current?.type === 'song'
+      && tracks.find((track) => track.title === current.meta.title && track.artist === current.meta.artist);
+    if (match && !overlaying) {
+      bindLyrics(el.stream.querySelector('.line.active .lyric'), current);
+    }
   }
 }
 
+function ackRemote(id, ok, error = '') {
+  if (!id || !wsAlive()) return;
+  try { ws.send(JSON.stringify({ kind: 'remoteAck', id, ok, error })); } catch { /* 服务端会按超时失败 */ }
+}
+
+function handleRemote(msg) {
+  if (msg.kind === 'remotePlay') {
+    if (!started) {
+      ackRemote(msg.id, false, '电脑上的 Claudio 还没点过播放');
+      return;
+    }
+    if (msg.mode === 'next') {
+      ackRemote(msg.id, true);
+      nextPlayback();
+      return;
+    }
+    if (msg.episode?.queue?.length) {
+      newGeneration(); stopped = false; loadEpisode(msg.episode);
+      ackRemote(msg.id, true);
+      return;
+    }
+    ackRemote(msg.id, false, '没有可放的歌');
+    return;
+  }
+  if (msg.kind === 'remoteControl' && msg.control) {
+    const acted = executeControl(msg.control);
+    ackRemote(msg.id, acted, acted ? '' : '现在做不到');
+  }
+}
+
+function handleWS(e) {
+  let msg; try { msg = JSON.parse(e.data); } catch { return; }
+  if (msg.kind === 'hello') { observeServerEpoch(msg.epoch); return; }
+  if (msg.kind === 'handoff') { onHandoff(msg); return; }
+  if (msg.kind === 'scheduled') {
+    if (!msg.claimId || !msg.episode) return;
+    if (pendingEpisode?.claimId === msg.claimId) return;
+    const occupied = Boolean(pendingEpisode);
+    const valid = acceptEpisode(msg.episode);
+    if (occupied || !started || stopped || !valid) {
+      releaseClaim({ claimId: msg.claimId });
+      return;
+    }
+    // 定时节目已在服务端领取，替换尚未完成的普通领取。
+    requests.claim?.abort(); requests.claim = null;
+    abandonPending();
+    holdEpisode(msg.episode, msg.claimId);
+    el.connMsg.textContent = '定时节目已就绪';
+    return;
+  }
+  if (msg.kind === 'episodesInvalidated') {
+    observeEpoch(msg.epoch);
+    if (!stopped && !pendingEpisode) scheduleClaim(0);
+    return;
+  }
+  observeEpoch(msg.epoch ?? msg.episode?.epoch);
+  if (msg.kind === 'remotePlay' || msg.kind === 'remoteControl') { handleRemote(msg); return; }
+  if (msg.kind === 'nextReady' && started && !stopped) {
+    el.connMsg.textContent = '下一期已就绪';
+    if (!pendingEpisode && (!exclusiveSink?.uid || exclusiveClock.paused)) { clearTimeout(claimPoll); claimPoll = null; gated('claimReady', requestNext); }
+  }
+  if (msg.kind === 'voiceReady' && pendingEpisode?.episode.id === msg.episodeId) {
+    applyPreparedVoice(pendingEpisode, { ...msg, status: 'ready' });
+  }
+  // 只有当前聊天的回包可以接入口播，其他服务端路径不能冒充回复。
+  if (msg.kind === 'sayDraft' && msg.requestId === currentRequestId && msg.origin === 'chat' && !stopped && !voiceContext && !streamPending) {
+    logChat('claudio', msg.say, { draft: true });
+    setState('选歌中…');
+  }
+  if (['sayReady', 'episode', 'sayFailed'].includes(msg.kind)) {
+    if (!currentRequestId || msg.requestId !== currentRequestId || msg.origin !== 'chat' || stopped) return;
+    if (msg.kind === 'episode' && msg.episode?.intent === 'control' && acceptEpisode(msg.episode)) applyEpisodeAction(msg.episode);
+    gated(`chat-${msg.kind}`, () => {
+      if (msg.requestId !== currentRequestId) return;
+      if (msg.kind === 'sayReady' && msg.url) startChatVoice(msg.url, msg.say || msg.text);
+      if (msg.kind === 'episode' && msg.episode && acceptEpisode(msg.episode)) {
+        streamPending = msg.episode;
+        if (chatVoiceFailed || msg.episode.voice?.status === 'skipped') failVoice();
+        else if (sayEnded) finishAfterSay(msg.episode);
+      }
+      if (msg.kind === 'sayFailed') { chatVoiceFailed = true; failVoice(); }
+    });
+  }
+  if (msg.kind === 'lyrics') applyLyrics(msg);
+  if (msg.kind === 'ttsLane') showLane(msg.state, msg.message);
+  if (msg.kind === 'ttsError') { setState('语音失败，音乐继续'); showLane('error', '语音暂时不可用'); }
+}
+
 function connectWS() {
-  try { ws = new WebSocket(`ws://${location.host}/stream`); }
+  // https 页面（经 Tailscale serve）只能连 wss://，写死 ws:// 会被浏览器拦下，页面一直显示 OFFLINE。
+  try { ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stream`); }
   catch { setConn(false); scheduleReconnect(); return; }
   ws.onopen = () => { setConn(true); wsRetry = 0; };
   ws.onmessage = handleWS;
@@ -1354,56 +2826,52 @@ function scheduleReconnect() {
   const delay = Math.min(30000, 1000 * 2 ** (wsRetry - 1)); // 1s,2s,4s,…,30s 上限
   setTimeout(connectWS, delay);
 }
-// 点头像看 Claudio 记下的关于你的事（长期记忆，透明可见）；下次播放刷新字幕时自然清掉
+// 点头像看 Claudio 记下的关于你的事（长期记忆，透明可见）
+function closeMemory() { el.memoryPanel.classList.add('hidden'); idleHider.refresh(); }
 document.querySelector('.avatar')?.addEventListener('click', async () => {
+  if (!el.memoryPanel.classList.contains('hidden')) { closeMemory(); return; }
   try {
     const j = await (await fetch('/api/memory')).json();
     const mem = (j.ok && (j.memory || '')).trim();
-    const div = document.createElement('div');
-    div.className = 'line active enter';
-    div.innerHTML = `<span class="who">Claudio 记得关于你</span><div class="bubble">${mem ? escapeHtml(mem).replace(/\n/g, '<br>') : '还没记下什么，多陪我聊聊就慢慢懂你了。'}</div>`;
-    el.stream.prepend(div);
-    div.scrollIntoView({ block: 'nearest' });
+    el.memoryText.textContent = mem || '还没记下什么，多陪我聊聊就慢慢懂你了。';
+    el.memoryPanel.classList.remove('hidden');
+    idleHider.refresh();
   } catch {}
 });
-
-// 迷你模式：缩成小窗（只剩 在放什么 + 控制）。Tauri 环境真缩窗口，浏览器仅切布局降级。
-// 缩窗 / 置顶：优先 Tauri 标准 window API（任何带 withGlobalTauri + capability 的 .app 都支持，不依赖自定义命令），
-// 失败再退到自定义 Rust command；两路都失败就把真实错误显示出来（区分「命令缺失 / 权限不足 / 接口缺失」）。
-function tauri() { return window.__TAURI__ || null; }
-async function setWin(w, h) {
-  const T = tauri();
-  if (!T) return; // 浏览器：不缩窗（仅 CSS 切布局）
-  try {
-    const getCur = T.window && (T.window.getCurrentWindow || T.window.getCurrent);
-    const LS = (T.dpi && T.dpi.LogicalSize) || (T.window && T.window.LogicalSize);
-    if (getCur && LS) { await getCur.call(T.window).setSize(new LS(w, h)); return; }
-  } catch (e1) { console.warn('[mini] 标准 setSize 失败', e1 && e1.message); }
-  try {
-    if (T.core && T.core.invoke) { await T.core.invoke('resize_window', { width: w, height: h }); return; }
-    setState('缩窗不可用：未检测到 Tauri 窗口接口');
-  } catch (e2) {
-    setState('缩窗失败：' + (e2 && (e2.message || e2)));
-    console.warn('[mini] command 失败', e2);
-  }
-}
-async function setOnTop(on) {
-  const T = tauri();
-  if (!T) return;
-  try {
-    const getCur = T.window && (T.window.getCurrentWindow || T.window.getCurrent);
-    if (getCur) { await getCur.call(T.window).setAlwaysOnTop(on); return; }
-  } catch (e1) { console.warn('[mini] 标准 onTop 失败', e1 && e1.message); }
-  try { if (T.core && T.core.invoke) await T.core.invoke('set_on_top', { on }); } catch (e2) { console.warn(e2); }
-}
-let mini = false;
-$('miniBtn')?.addEventListener('click', () => {
-  mini = !mini;
-  document.body.classList.toggle('mini', mini);
-  const b = $('miniBtn');
-  if (b) { b.textContent = mini ? '△' : '▽'; b.title = mini ? '展开' : '迷你模式（缩小成小窗）'; }
-  setWin(mini ? 380 : 440, mini ? 120 : 760);
-  setOnTop(mini); // 只在迷你模式置顶（小控制器悬浮）；全窗工作时不置顶、不挡别的 app
+el.memoryPanel.addEventListener('click', closeMemory);
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  const panelOpen = !el.settingsBackdrop.classList.contains('hidden')
+    || !el.memoryPanel.classList.contains('hidden') || el.chat.classList.contains('open');
+  if (!panelOpen) return;
+  event.preventDefault();
+  closeSettings();
+  closeMemory();
+  setChatOpen(false);
 });
+
+// 窗口模式只管呈现，音乐仍由播放引擎持有。
+const isInteractionActive = () => Boolean(
+  document.querySelector('.output-menu:not(.hidden), [popover]:popover-open, [role="menu"][data-open="true"]')
+  || !el.settingsBackdrop.classList.contains('hidden')
+  || !el.memoryPanel.classList.contains('hidden')
+  || el.chat.classList.contains('open')
+);
+const immersive = wireImmersive({
+  button: el.fullscreenBtn,
+  isInteractionActive,
+  onError: () => setState('窗口切换失败，请重试'),
+  beforeToggle: () => { closeSettings(); closeMemory(); setChatOpen(false); },
+  onChange: () => {
+    lyricView?.recenter();
+    requestAnimationFrame(() => lyricView?.recenter());
+  },
+});
+const idleHider = immersive.idleHider;
+window.addEventListener('pagehide', () => {
+  reportPlayback();
+  clearStageView(); lyricClock.stop();
+  immersive.dispose().catch(() => {});
+}, { once: true });
 
 connectWS();

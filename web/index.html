@@ -2,292 +2,300 @@
 <html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
     <title>Claudio</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Doto:wght@400;600;800&family=Space+Mono:wght@400;700&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/styles.css?v=7" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/mascot.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Claudio" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/styles.css?v=15" />
   </head>
   <body>
-    <div class="bg-glow" id="bgGlow"></div>
-    <div class="meteors" aria-hidden="true"></div>
-    <div class="cursor-glow" id="cursorGlow"></div>
-    <div class="spotlight" id="spotlight"></div>
-    <div class="frame">
-      <!-- 顶栏 -->
+    <svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="M8.2 4.9v14.2c0 .8.9 1.3 1.6.9l10.8-7.1c.6-.4.6-1.4 0-1.8L9.8 4c-.7-.4-1.6.1-1.6.9z" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.2" y="4.5" width="4.1" height="15" rx="1.3" fill="currentColor" stroke="none"/><rect x="13.7" y="4.5" width="4.1" height="15" rx="1.3" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="i-prev" viewBox="0 0 24 24"><path d="M5.8 5.2v13.6" stroke-width="2.2"/><path d="M19 5.9v12.2c0 .7-.8 1.1-1.4.7L9.5 12.7a.85.85 0 0 1 0-1.4l8.1-6.1c.6-.4 1.4 0 1.4.7z" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="i-next" viewBox="0 0 24 24"><path d="M18.2 5.2v13.6" stroke-width="2.2"/><path d="M5 5.9v12.2c0 .7.8 1.1 1.4.7l8.1-6.1a.85.85 0 0 0 0-1.4L6.4 5.2C5.8 4.8 5 5.2 5 5.9z" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.2" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20s-7.2-4.4-7.2-10.1A4.2 4.2 0 0 1 12 7.1a4.2 4.2 0 0 1 7.2 2.8C19.2 15.6 12 20 12 20z"/></symbol>
+        <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M6.2 6.2l11.6 11.6"/></symbol>
+        <symbol id="i-airplay" viewBox="0 0 24 24"><path d="M7 17.5H6A2.5 2.5 0 0 1 3.5 15V7A2.5 2.5 0 0 1 6 4.5h12A2.5 2.5 0 0 1 20.5 7v8a2.5 2.5 0 0 1-2.5 2.5h-1"/><path d="M12 14.5l4.4 6H7.6z" fill="currentColor"/></symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.2A7.8 7.8 0 0 1 9.8 4.5a7.8 7.8 0 1 0 9.7 9.7z"/></symbol>
+        <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/></symbol>
+        <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5.5M6 11.2l6-5.7 6 5.7"/></symbol>
+        <symbol id="i-gear" viewBox="0 0 24 24"><path d="M10.08 4.85L10.33 2.55A9.6 9.6 0 0 1 13.67 2.55L13.92 4.85A7.4 7.4 0 0 1 15.7 5.59L17.51 4.14A9.6 9.6 0 0 1 19.86 6.49L18.41 8.3A7.4 7.4 0 0 1 19.15 10.08L21.45 10.33A9.6 9.6 0 0 1 21.45 13.67L19.15 13.92A7.4 7.4 0 0 1 18.41 15.7L19.86 17.51A9.6 9.6 0 0 1 17.51 19.86L15.7 18.41A7.4 7.4 0 0 1 13.92 19.15L13.67 21.45A9.6 9.6 0 0 1 10.33 21.45L10.08 19.15A7.4 7.4 0 0 1 8.3 18.41L6.49 19.86A9.6 9.6 0 0 1 4.14 17.51L5.59 15.7A7.4 7.4 0 0 1 4.85 13.92L2.55 13.67A9.6 9.6 0 0 1 2.55 10.33L4.85 10.08A7.4 7.4 0 0 1 5.59 8.3L4.14 6.49A9.6 9.6 0 0 1 6.49 4.14L8.3 5.59A7.4 7.4 0 0 1 10.08 4.85Z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+        <symbol id="i-fullscreen" viewBox="0 0 24 24"><path d="M8 3.5H3.5V8M16 3.5h4.5V8M3.5 16v4.5H8M20.5 16v4.5H16"/></symbol>
+        <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6.5 14.5L12 9l5.5 5.5"/></symbol>
+        <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4.5 9.8v4.4h3.2l4.3 3.6V6.2L7.7 9.8z" fill="currentColor" stroke="none"/><path d="M15.5 9.2a4 4 0 0 1 0 5.6M18 7a7.2 7.2 0 0 1 0 10"/></symbol>
+        <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+        <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="i-history" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.2 4.8v3.4h3.4"/><path d="M12 8.2V12l2.6 1.8"/></symbol>
+        <symbol id="i-qr" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2.5v2.5H14zM17.5 17.5H20V20h-2.5zM14 20h2"/></symbol>
+      </defs>
+    </svg>
+
+    <div class="backdrop" aria-hidden="true">
+      <div class="bd" id="bdA"></div>
+      <div class="bd" id="bdB"></div>
+    </div>
+
+    <main class="gate" id="loading"><span class="logo">CLAUDIO</span></main>
+
+    <!-- 公用版：没有设备时的门口 -->
+    <main class="gate hidden" id="gate">
+      <span class="logo">CLAUDIO</span>
+      <form class="gate-form" id="pairForm" autocomplete="off">
+        <input id="pairCode" inputmode="numeric" maxlength="6" placeholder="6 位配对码" aria-label="配对码" />
+        <button class="btn-solid" type="submit">加入</button>
+      </form>
+      <p class="result" id="gateMsg"></p>
+      <button class="btn-line hidden" id="wechatGo" type="button">就在微信里听</button>
+      <a class="link" href="/apply">申请邀请</a>
+    </main>
+
+    <div class="app hidden" id="app">
       <header class="topbar">
         <div class="brand">
-          <img class="avatar" src="/mascot.png" alt="Claudio" title="点我看 Claudio 记得关于你的事" />
-          <span class="logo">Claudio</span>
+          <span class="logo">CLAUDIO</span>
+          <span class="live-tag" id="liveTag">OFFLINE</span>
         </div>
+        <div class="lane-pill hidden" id="lanePill" data-state="starting"><i class="lane-dot"></i><span id="laneText"></span></div>
         <div class="top-actions">
-          <button class="pill settings-toggle" id="settingsBtn" title="模型与推荐设置">⚙</button>
-          <button class="pill mini-toggle" id="miniBtn" title="迷你模式（缩小成小窗）">▽</button>
-          <button class="fish-credit" id="fishCredit" title="Fish Audio 余额 · 点击去充值">
-            <span class="fc-dot"></span><span class="fc-label">FISH</span><span class="fc-val" id="fishCreditVal">—</span>
-          </button>
-          <div class="seg">
-            <button class="seg-btn active" data-theme-btn="dark">DARK</button>
-            <button class="seg-btn" data-theme-btn="light">LIGHT</button>
-          </div>
+          <span class="quota hidden" id="quotaTag" data-cap="quota"></span>
+          <button class="icon-btn hidden" id="historyBtn" data-cap="history" type="button" aria-label="最近听过" title="最近听过"><svg class="ico"><use href="#i-history"/></svg></button>
+          <button class="icon-btn hidden" id="settingsBtn" data-cap="settings" type="button" aria-label="设置" title="设置"><svg class="ico"><use href="#i-gear"/></svg></button>
+          <button class="icon-btn" id="fullscreenBtn" type="button" aria-label="沉浸歌词" title="沉浸歌词（F）"><svg class="ico"><use href="#i-fullscreen"/></svg></button>
+          <button class="icon-btn hidden" id="accountBtn" data-cap="account" type="button" aria-label="账号与设备" title="账号与设备"><svg class="ico"><use href="#i-more"/></svg></button>
         </div>
       </header>
 
-      <!-- 时钟面板 -->
-      <section class="clock-panel">
-        <canvas class="clock-canvas" id="clockCanvas"></canvas>
-        <canvas class="wave-big" id="waveBig"></canvas>
-        <div class="date-line">
-          <span class="weekday" id="weekday">—</span>
-          <span class="date" id="date">— · — · —</span>
-          <span class="onair"><span class="dot"></span> ON AIR</span>
-        </div>
-      </section>
+      <div class="deck">
+        <div class="cover cover-lg"><img class="cover-img" src="/mascot.png" alt="" draggable="false" /></div>
 
-      <!-- 播放器控制栏 -->
-      <section class="player">
-        <div class="now-mini">
+        <section class="now">
+          <div class="cover cover-sm"><img class="cover-img" src="/mascot.png" alt="" draggable="false" /></div>
           <div class="now-text">
-            <div class="now-title" id="nowTitle">— · —</div>
-            <div class="now-state" id="nowState">PRESS ▶ TO START</div>
+            <div class="now-title" id="nowTitle">—</div>
+            <div class="now-meta" id="nowMeta"></div>
+            <div class="chip" id="nowState">READY</div>
           </div>
-        </div>
-        <div class="controls">
-          <div class="transport">
-            <button class="ctrl" id="prevBtn" title="上一段">⏮</button>
-            <button class="ctrl ctrl-main" id="playBtn" title="播放/暂停">▶</button>
-            <button class="ctrl" id="nextBtn" title="下一首/换一首">⏭</button>
-            <button class="ctrl" id="stopBtn" title="停止">⏹</button>
-            <button class="ctrl" id="dislikeBtn" title="不喜欢这首，以后少推荐">⊘</button>
-            <button class="ctrl" id="favBtn" title="收藏这首">♡</button>
+          <div class="now-actions">
+            <button class="icon-btn heart" id="favBtn" type="button" aria-label="收藏" title="收藏这首"><svg class="ico"><use href="#i-heart"/></svg></button>
+            <button class="icon-btn ban hidden" id="dislikeBtn" data-cap="dislike" type="button" aria-label="以后不放" title="以后不放这首"><svg class="ico"><use href="#i-ban"/></svg></button>
           </div>
-          <div class="vol">
-            <span class="vol-label">VOL</span>
-            <input type="range" id="vol" min="0" max="100" value="100" />
-            <button class="ctrl airplay" id="airplayBtn" title="投放到 AirPlay 音箱">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-1"/><path d="M12 15l5 6H7l5-6z" fill="currentColor" stroke="none"/></svg>
+        </section>
+
+        <section class="transport">
+          <div class="progress">
+            <span class="time" id="curTime">0:00</span>
+            <div class="bar" id="bar"><div class="bar-fill" id="barFill"></div></div>
+            <span class="time" id="durTime">0:00</span>
+          </div>
+          <div class="main-row">
+            <button class="btn-skip hidden" id="prevBtn" data-cap="prev" type="button" aria-label="上一段" title="上一段"><svg class="ico"><use href="#i-prev"/></svg></button>
+            <button class="btn-play" id="playBtn" type="button" aria-label="播放/暂停" title="播放">
+              <svg class="ico ico-play"><use href="#i-play"/></svg>
+              <svg class="ico ico-pause"><use href="#i-pause"/></svg>
             </button>
+            <button class="btn-skip" id="nextBtn" type="button" aria-label="下一首" title="下一首"><svg class="ico"><use href="#i-next"/></svg></button>
           </div>
-          <!-- 迷你模式下显示当前歌词一行（全窗模式隐藏） -->
-          <div class="mini-lyric" id="miniLyric"></div>
-        </div>
-      </section>
-
-      <!-- 进度 -->
-      <div class="progress">
-        <span class="t" id="curTime">0:00</span>
-        <div class="bar" id="bar"><div class="bar-fill" id="barFill"></div></div>
-        <span class="t" id="durTime">0:00</span>
+          <div class="sub-row">
+            <div class="vol">
+              <svg class="ico vol-ico"><use href="#i-vol"/></svg>
+              <input type="range" id="vol" min="0" max="100" value="100" aria-label="音量" />
+            </div>
+            <button class="icon-btn hidden" id="airplayBtn" data-cap="outputs" type="button" aria-label="投放到音箱" title="投放到音箱"><svg class="ico"><use href="#i-airplay"/></svg></button>
+            <button class="icon-btn sleep hidden" id="sleepBtn" data-cap="sleep" type="button" aria-label="睡眠定时" title="睡眠定时"><svg class="ico"><use href="#i-moon"/></svg><span class="sleep-badge" id="sleepBadge"></span></button>
+            <button class="icon-btn hidden" id="stopBtn" data-cap="stop" type="button" aria-label="停止" title="停止"><svg class="ico"><use href="#i-stop"/></svg></button>
+          </div>
+        </section>
       </div>
 
-      <!-- QUEUE 头 -->
-      <div class="queue-head">
-        <span>QUEUE</span>
-        <span id="queueCount">0 TRACKS</span>
-      </div>
-
-      <!-- 直播 / 播报区 -->
-      <section class="live">
-        <div class="live-head">
-          <span class="live-name"><span class="dot"></span> Claudio</span>
-          <span class="live-tag" id="liveTag">OFFLINE</span>
+      <section class="stage">
+        <div class="stage-head">
+          <img class="avatar" src="/mascot.png" alt="Claudio" title="Claudio 记得的事" draggable="false" />
+          <span class="stage-name">CLAUDIO</span>
+          <canvas class="meter hidden" id="meter" data-cap="meter" aria-hidden="true"></canvas>
         </div>
-        <div class="live-conn" id="connMsg">Connecting to Claudio server…</div>
-        <div id="stream" class="stream"></div>
-        <div class="now-playing" id="nowPlaying"></div>
+        <div class="stream" id="stream"></div>
+        <div class="stage-empty" aria-hidden="true">CLAUDIO</div>
+        <div class="memory hidden" id="memoryPanel"><div class="memory-scroll"><div id="memoryText"></div></div></div>
       </section>
 
-      <!-- 输入栏 -->
+      <button class="bind-tip hidden" id="bindTip" type="button"><svg class="ico"><use href="#i-qr"/></svg><span>绑定网易云：点歌、用你自己的会员音质</span><b>扫码</b></button>
+      <section class="chat hidden" id="chat">
+        <div class="chat-glass"><div class="chat-log" id="chatLog"></div></div>
+        <button class="chat-toggle" id="chatToggle" type="button" aria-expanded="false" aria-label="展开对话"><svg class="ico"><use href="#i-chevron"/></svg></button>
+      </section>
+
+      <p class="notice" id="notice" role="status"></p>
+
       <div class="composer">
-        <input id="moodInput" placeholder="跟 DJ 说点什么…（回车发送）" />
-        <button class="mic" id="sleepBtn" title="睡眠定时 30 分钟"><img class="sleep-icon" src="/sleep.png" alt="睡眠" /><span class="sleep-badge" id="sleepBadge"></span></button>
-        <button class="send" id="sendBtn" title="发送">↑</button>
+        <input id="moodInput" type="text" maxlength="200" placeholder="跟 Claudio 说点什么" autocomplete="off" enterkeyhint="send" />
+        <button class="icon-btn mic hidden" id="voiceBtn" data-cap="voice" type="button" aria-label="语音输入" title="按一下说话，再按一下送出"><svg class="ico"><use href="#i-mic"/></svg></button>
+        <button class="btn-send" id="sendBtn" type="button" aria-label="发送" title="发送"><svg class="ico"><use href="#i-send"/></svg></button>
       </div>
 
-      <!-- 底栏 -->
-      <footer class="footbar">
-        <span>CLAUDIO FM</span>
+      <div class="sr-only">
+        <span id="connMsg">Connecting to Claudio server…</span>
+        <span id="queueCount">0 TRACKS</span>
+        <span id="nowPlaying"></span>
         <span id="connState">CONNECTING…</span>
-      </footer>
+      </div>
     </div>
 
-    <div class="settings-backdrop hidden" id="settingsBackdrop" aria-hidden="true">
-      <section class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-        <header class="settings-head">
-          <div>
-            <span class="settings-kicker">CLAUDIO CONTROL</span>
-            <h2 id="settingsTitle">设置</h2>
-          </div>
-          <button class="settings-close" id="settingsClose" aria-label="关闭设置">×</button>
+    <div class="sheet-backdrop hidden" id="settingsBackdrop" aria-hidden="true">
+      <section class="sheet" role="dialog" aria-modal="true" aria-label="设置">
+        <header class="sheet-head">
+          <h2>设置</h2>
+          <button class="icon-btn" id="settingsClose" type="button" aria-label="关闭" title="关闭"><svg class="ico"><use href="#i-close"/></svg></button>
         </header>
 
-        <div class="settings-group">
-          <label for="providerSelect">大模型</label>
-          <select id="providerSelect">
-            <option value="codex">ChatGPT（订阅）</option>
-            <option value="grok">Grok（订阅）</option>
-            <option value="claude">Claude（订阅）</option>
-            <option value="deepseek">DeepSeek（API）</option>
-          </select>
-          <div class="settings-hint" id="providerHint">默认使用速度和质量平衡的 GPT-5.6 Luna</div>
+        <div class="sheet-body">
+          <section class="group">
+            <h3>大脑</h3>
+            <div class="seg" id="providerSeg" role="radiogroup" aria-label="大脑">
+              <button type="button" role="radio" data-value="local" aria-checked="true">本地盒子</button>
+              <button type="button" role="radio" data-value="claude" aria-checked="false">Claude</button>
+              <button type="button" role="radio" data-value="deepseek" aria-checked="false">DeepSeek</button>
+            </div>
+            <div class="pane" data-for="providerSeg" data-pane="local">
+              <label class="field"><span>服务地址</span><input id="localBaseUrl" type="text" autocomplete="off" spellcheck="false" /></label>
+              <label class="field"><span>模型名</span><input id="localModel" type="text" autocomplete="off" spellcheck="false" /></label>
+              <label class="field"><span>API Key</span><input id="localLlmApiKey" type="password" autocomplete="off" spellcheck="false" /></label>
+            </div>
+            <div class="pane hidden" data-for="providerSeg" data-pane="claude">
+              <label class="field"><span>模型</span><select id="claudeModelSelect"></select></label>
+            </div>
+            <div class="pane hidden" data-for="providerSeg" data-pane="deepseek">
+              <label class="field"><span>模型</span><select id="deepseekModelSelect"></select></label>
+              <label class="field"><span>API Key</span><input id="deepseekApiKey" type="password" autocomplete="off" spellcheck="false" /></label>
+              <p class="risk">你说的话和口播稿会发送到 DeepSeek 云端。</p>
+            </div>
+            <p class="warn hidden" id="llmWarn"></p>
+            <div class="test-row">
+              <button class="btn-line" id="testModelBtn" type="button">测速</button>
+              <span class="result" id="modelResult"></span>
+            </div>
+          </section>
+
+          <section class="group">
+            <h3>语音</h3>
+            <div class="seg" id="ttsSeg" role="radiogroup" aria-label="语音">
+              <button type="button" role="radio" data-value="pc5090" aria-checked="true">5090 语音</button>
+              <button type="button" role="radio" data-value="fish" aria-checked="false">Fish</button>
+            </div>
+            <div class="pane" data-for="ttsSeg" data-pane="pc5090">
+              <label class="field"><span>服务地址</span><input id="pc5090BaseUrl" type="text" autocomplete="off" spellcheck="false" /></label>
+              <label class="field"><span>音色</span><input id="pc5090Voice" type="text" autocomplete="off" spellcheck="false" /></label>
+            </div>
+            <div class="pane hidden" data-for="ttsSeg" data-pane="fish">
+              <label class="field"><span>API Key</span><input id="fishApiKey" type="password" autocomplete="off" spellcheck="false" /></label>
+              <div class="field-row">
+                <label class="field"><span>模型</span><select id="fishModelSelect"></select></label>
+                <label class="field"><span>音色 ID</span><input id="fishVoiceId" type="text" autocomplete="off" spellcheck="false" /></label>
+              </div>
+              <button class="balance hidden" id="fishBalance" type="button"><span>余额</span><b id="fishBalanceVal">—</b></button>
+            </div>
+            <div class="test-row">
+              <button class="btn-line" id="testTtsBtn" type="button">试听</button>
+              <span class="result" id="ttsResult"></span>
+            </div>
+            <audio class="preview hidden" id="ttsPreview" controls preload="none"></audio>
+          </section>
+
+          <section class="group">
+            <h3>推荐</h3>
+            <div class="seg" id="modeSeg" role="radiogroup" aria-label="推荐">
+              <button type="button" role="radio" data-value="discovery" aria-checked="true">发现</button>
+              <button type="button" role="radio" data-value="balanced" aria-checked="false">平衡</button>
+              <button type="button" role="radio" data-value="familiar" aria-checked="false">熟悉</button>
+            </div>
+            <label class="field"><span>音质</span><select id="audioQualitySelect"></select></label>
+          </section>
+
+          <section class="group">
+            <h3>曲库<span class="count" id="favoritesCount">—</span></h3>
+            <div class="inline-form">
+              <input id="favoritePlaylistInput" type="text" placeholder="网易云歌单链接或 ID" autocomplete="off" spellcheck="false" />
+              <button class="btn-line" id="importFavoritesBtn" type="button">导入</button>
+            </div>
+            <p class="result" id="favoritesImportResult"></p>
+            <h4>以后不放</h4>
+            <div class="ban-list" id="banList"></div>
+          </section>
+
+          <section class="group">
+            <h3>记忆<button class="link" id="refreshProfileBtn" type="button">刷新</button></h3>
+            <div class="profile" id="profileSummary"></div>
+          </section>
+
+          <section class="group">
+            <h3>外观</h3>
+            <div class="seg" id="themeSeg" role="radiogroup" aria-label="外观">
+              <button type="button" role="radio" data-value="dark" aria-checked="true">DARK</button>
+              <button type="button" role="radio" data-value="light" aria-checked="false">LIGHT</button>
+            </div>
+          </section>
         </div>
 
-        <div class="provider-settings" id="codexSettings">
-          <div class="settings-grid">
-            <div class="settings-group">
-              <label for="modelSelect">ChatGPT 模型</label>
-              <select id="modelSelect">
-                <option value="gpt-5.6-luna">Luna · 快速平衡</option>
-                <option value="gpt-5.6-terra">Terra · 更高质量</option>
-                <option value="gpt-5.6-sol">Sol · 最高质量</option>
-              </select>
-            </div>
-            <div class="settings-group">
-              <label for="effortSelect">思考强度</label>
-              <select id="effortSelect">
-                <option value="low">低 · 速度优先</option>
-                <option value="medium">中 · 更细致</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        <div class="provider-settings hidden" id="grokSettings">
-          <div class="settings-grid">
-            <div class="settings-group">
-              <label for="grokModelSelect">Grok 模型</label>
-              <select id="grokModelSelect">
-                <option value="grok-4.6">Grok 4.6 · 质量优先</option>
-                <option value="grok-4.5">Grok 4.5</option>
-                <option value="grok-composer-2.5-fast">Composer 2.5 Fast · 速度优先</option>
-              </select>
-            </div>
-            <div class="settings-group">
-              <label for="grokEffortSelect">思考强度</label>
-              <select id="grokEffortSelect">
-                <option value="low">低 · 速度优先</option>
-                <option value="medium">中 · 更细致</option>
-              </select>
-            </div>
-          </div>
-          <div class="settings-group">
-            <div class="settings-hint" id="grokLoginHint">尚未登录 Grok 订阅。点登录后会弹出系统浏览器，用 SuperGrok / X Premium+ 账号验证。</div>
-          </div>
-          <div class="settings-actions compact-actions">
-            <button class="settings-secondary" id="grokLoginBtn">在浏览器中登录</button>
-            <button class="settings-secondary hidden" id="grokLogoutBtn">退出登录</button>
-            <button class="settings-secondary hidden" id="grokOpenVerifyBtn">打开验证页</button>
-          </div>
-          <div class="settings-result" id="grokLoginResult">登录态只保存在这台电脑，界面不会回显 token。</div>
-        </div>
-
-        <div class="provider-settings hidden" id="claudeSettings">
-          <div class="settings-grid">
-            <div class="settings-group">
-              <label for="claudeAccessSelect">接入方式</label>
-              <select id="claudeAccessSelect" disabled>
-                <option value="subscription">Claude 订阅 · 本机登录</option>
-              </select>
-            </div>
-            <div class="settings-group">
-              <label for="claudeModelSelect">Claude 模型</label>
-              <select id="claudeModelSelect">
-                <option value="sonnet">Sonnet · 速度质量平衡</option>
-                <option value="opus">Opus · 质量优先</option>
-              </select>
-            </div>
-          </div>
-          <div class="settings-hint">使用接收方电脑上的 Claude 订阅登录，不会读取或传输订阅凭据。</div>
-        </div>
-
-        <div class="provider-settings hidden" id="deepseekSettings">
-          <div class="settings-group">
-            <label for="deepseekModelSelect">DeepSeek 模型</label>
-            <select id="deepseekModelSelect">
-              <option value="deepseek-v4-flash">V4 Flash · 更快更省</option>
-              <option value="deepseek-v4-pro">V4 Pro · 质量优先</option>
-            </select>
-          </div>
-          <div class="settings-group">
-            <label for="deepseekApiKey">DeepSeek API Key</label>
-            <input id="deepseekApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="填写后保存在本机" />
-            <div class="settings-hint" id="deepseekKeyHint">密钥不会在设置接口中回显。</div>
-          </div>
-        </div>
-
-        <div class="settings-group">
-          <label for="recommendationSelect">推荐方式</label>
-          <select id="recommendationSelect">
-            <option value="discovery">发现 · 65% 同风格小众 + 25% 边界探索</option>
-            <option value="balanced">平衡 · 新鲜与熟悉各占一半</option>
-            <option value="familiar">熟悉 · 以常听风格为主</option>
-          </select>
-          <div class="settings-hint">收藏歌只作口味锚点；“发现”模式默认不直接播放收藏原曲。</div>
-        </div>
-
-        <section class="settings-section">
-          <div class="settings-section-head">
-            <div><span class="settings-section-title">我的口味曲库</span><span class="settings-badge" id="favoritesCount">读取中</span></div>
-          </div>
-          <div class="settings-group">
-            <label for="favoritePlaylistInput">导入网易云歌单</label>
-            <input id="favoritePlaylistInput" type="text" autocomplete="off" spellcheck="false" placeholder="粘贴歌单链接或歌单 ID" />
-            <div class="settings-hint">导入后只作为口味分析和小众挖掘参考；重复歌曲自动跳过。私密歌单需先设为公开，或在本机配置网易云登录 Cookie。</div>
-          </div>
-          <div class="settings-actions compact-actions">
-            <button class="settings-secondary" id="importFavoritesBtn">导入并合并</button>
-          </div>
-          <div class="settings-result" id="favoritesImportResult">每台电脑都有独立曲库，分享 App 不会带上你的个人歌单。</div>
-        </section>
-
-        <section class="settings-section">
-          <div class="settings-section-head">
-            <div><span class="settings-section-title">Fish Audio 语音</span><span class="settings-badge">固定启用</span></div>
-            <span class="settings-hint" id="fishKeyStatus">未配置</span>
-          </div>
-          <div class="settings-group">
-            <label for="fishApiKey">Fish API Key</label>
-            <input id="fishApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="填写后保存在本机" />
-          </div>
-          <div class="settings-grid">
-            <div class="settings-group">
-              <label for="fishModelSelect">语音模型</label>
-              <select id="fishModelSelect">
-                <option value="s1">S1 · 速度优先</option>
-                <option value="s2-pro">S2-Pro · 官方推荐</option>
-              </select>
-            </div>
-            <div class="settings-group">
-              <label for="fishVoiceId">音色 ID</label>
-              <input id="fishVoiceId" type="text" autocomplete="off" spellcheck="false" placeholder="Fish voice / reference ID" />
-            </div>
-          </div>
-          <div class="settings-actions compact-actions">
-            <button class="settings-secondary" id="testFishBtn">保存并测试语音</button>
-          </div>
-          <div class="settings-result" id="fishTestResult">测试会生成一句短口播，并直接试听。</div>
-          <audio class="fish-preview hidden" id="fishPreview" controls preload="none"></audio>
-        </section>
-
-        <div class="settings-actions">
-          <button class="settings-secondary" id="testModelBtn">保存并测速</button>
-          <button class="settings-primary" id="saveSettingsBtn">保存设置</button>
-        </div>
-        <div class="settings-result" id="settingsResult">切换后从下一次推荐开始生效。</div>
-
-        <div class="memory-card">
-          <div class="memory-card-head"><span>Claudio 正在学到什么</span><button id="refreshProfileBtn">刷新</button></div>
-          <div id="profileSummary" class="profile-summary">正在读取…</div>
-        </div>
-        <div class="settings-footnote">API Key 和 Grok 登录态只保存在当前电脑的本地忽略目录，界面和接口均不回显。语音固定使用 Fish Audio；失败会明确提示，不会自动切换到 macOS 本地语音。</div>
+        <footer class="sheet-foot">
+          <span class="result" id="settingsResult"></span>
+          <button class="btn-solid" id="saveSettingsBtn" type="button">保存</button>
+        </footer>
       </section>
     </div>
 
-    <script src="/app.js?v=10" type="module"></script>
+    <!-- 公用版：账号与设备、最近听过、绑定网易云 -->
+    <div class="sheet-backdrop hidden" id="accountBackdrop">
+      <section class="sheet" role="dialog" aria-modal="true" aria-label="账号与设备">
+        <header class="sheet-head"><h2 id="meName">Claudio</h2><button class="icon-btn" data-close type="button" aria-label="关闭"><svg class="ico"><use href="#i-close"/></svg></button></header>
+        <div class="sheet-body">
+          <section class="group">
+            <h3>网易云</h3>
+            <div class="row"><span id="ncmState"></span><button class="btn-line" id="ncmBtn" type="button"></button></div>
+          </section>
+          <section class="group">
+            <h3>设备<span class="count" id="devState"></span></h3>
+            <div class="row"><span class="dim">在另一台设备上输入配对码</span><button class="btn-line" id="pairBtn" type="button">添加设备</button></div>
+            <div class="pair hidden" id="pairShow"></div>
+          </section>
+          <section class="group">
+            <h3>记忆</h3>
+            <div class="row"><span class="dim" id="memState"></span><button class="btn-line" id="memBtn" type="button">清空（含最近听过）</button></div>
+          </section>
+          <section class="group">
+            <div class="row"><span></span><button class="btn-line danger" id="logoutBtn" type="button">退出这台设备</button></div>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <div class="sheet-backdrop hidden" id="historyBackdrop">
+      <section class="sheet" role="dialog" aria-modal="true" aria-label="最近听过">
+        <header class="sheet-head"><h2>最近听过</h2><button class="icon-btn" data-close type="button" aria-label="关闭"><svg class="ico"><use href="#i-close"/></svg></button></header>
+        <div class="sheet-body">
+          <ol class="history" id="historyList"></ol>
+          <p class="result hidden" id="historyEmpty">还没听过歌</p>
+        </div>
+      </section>
+    </div>
+
+    <div class="sheet-backdrop hidden" id="qrBackdrop">
+      <section class="sheet sheet-sm" role="dialog" aria-modal="true" aria-label="绑定网易云">
+        <header class="sheet-head"><h2>绑定网易云</h2><button class="icon-btn" data-close type="button" aria-label="关闭"><svg class="ico"><use href="#i-close"/></svg></button></header>
+        <div class="sheet-body qr-body">
+          <img id="qrImg" alt="网易云登录二维码" width="200" height="200" />
+          <p class="result" id="qrMsg">用网易云音乐 App 扫码</p>
+        </div>
+      </section>
+    </div>
+
+    <script src="/boot.js?v=2" type="module"></script>
   </body>
 </html>

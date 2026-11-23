@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 
-test('桌面 App 内置网易云服务只开放 Claudio 需要的五个只读接口', () => {
+test('容器内置网易云服务只开放 Claudio 需要的七个只读接口', () => {
   const { buildModuleDefs } = require('../packaging/ncm-modules.cjs');
   const defs = buildModuleDefs('/runtime/NeteaseCloudMusicApi', (file) => file);
   assert.deepEqual(defs.map((item) => item.route), [
@@ -13,6 +13,8 @@ test('桌面 App 内置网易云服务只开放 Claudio 需要的五个只读接
     '/lyric',
     '/simi/song',
     '/playlist/track/all',
+    '/song/detail',
+    '/song/wiki/summary',
   ]);
   assert.equal(defs.every((item) => item.module.startsWith('/runtime/NeteaseCloudMusicApi/module/')), true);
 });

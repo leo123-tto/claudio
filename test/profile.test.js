@@ -45,3 +45,31 @@ test('模型推断至少被两条独立证据支持才进入稳定记忆', () =>
   assert.equal(twice.memories.stable.length, 1);
   assert.equal(twice.memories.stable[0].value, '夜晚偏爱安静女声');
 });
+
+test('取消爱心撤掉按钮加分，重复点击不重复计分，聊天喜欢保留', () => {
+  const song = { title: 'A', artist: '甲' };
+  const liked = [
+    { type: 'favorite', song, source: 'button' },
+    { type: 'favorite', song, source: 'button' },
+    { type: 'explicit_like', song, source: 'chat' },
+  ];
+  assert.equal(deriveProfile(liked).songs[0].score, 180);
+  assert.equal(deriveProfile([...liked, { type: 'unfavorite', song, source: 'button' }]).songs[0].score, 100);
+  assert.equal(deriveProfile([{ type: 'favorite', song, source: 'button' }, { type: 'unfavorite', song, source: 'button' }]).songs.length, 0);
+});
+
+test('等待时的垫歌行为不改变画像或稳定记忆', () => {
+  const song = { title: '垫歌', artist: '垫歌者' };
+  const events = [
+    { type: 'play_completed', song, source: 'filler', listenRatio: 1 },
+    { type: 'skip', song, source: 'filler', listenedSec: 2 },
+    { type: 'favorite', song, source: 'filler' },
+    { type: 'memory_inferred', source: 'filler', key: 'genre', value: '爵士', evidenceId: '1' },
+    { type: 'memory_inferred', source: 'filler', key: 'genre', value: '爵士', evidenceId: '2' },
+  ];
+  assert.equal(signalWeight(events[0]), 0);
+  const profile = deriveProfile(events);
+  assert.deepEqual(profile.songs, []);
+  assert.deepEqual(profile.artists, []);
+  assert.deepEqual(profile.memories, { stable: [], pending: [] });
+});

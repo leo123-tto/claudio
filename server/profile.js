@@ -11,7 +11,14 @@ const WEIGHTS = Object.freeze({
 const WEAK_SIGNALS = new Set(['play_completed', 'play_progress', 'skip', 'memory_inferred']);
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+export function isFillerEvent(event = {}) {
+  return event.source === 'filler' || event.discoveryType === 'filler' || event.filler === true
+    || event.song?.discoveryType === 'filler' || event.song?.meta?.discoveryType === 'filler'
+    || event.song?.filler === true || event.song?.meta?.filler === true;
+}
+
 export function signalWeight(event = {}) {
+  if (isFillerEvent(event)) return 0;
   if (Object.hasOwn(WEIGHTS, event.type)) return WEIGHTS[event.type];
   if (event.type === 'play_completed') return Number(event.listenRatio) >= 0.8 ? 20 : 0;
   if (event.type === 'play_progress') {
@@ -43,6 +50,24 @@ function songKey(song) {
   return `${text(song?.title).toLocaleLowerCase()}|${text(song?.artist).toLocaleLowerCase()}`;
 }
 
+// 爱心是当前状态。撤销只影响按钮，不会抹掉亲口表达或旧未知来源的喜欢。
+export function activeTasteEvents(events = []) {
+  const seenButtons = new Set();
+  const active = [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event || isFillerEvent(event)) continue;
+    if (['favorite', 'unfavorite'].includes(event.type) && event.source === 'button') {
+      const key = songKey(event.song);
+      if (seenButtons.has(key)) continue;
+      seenButtons.add(key);
+      if (event.type === 'unfavorite') continue;
+    }
+    active.push(event);
+  }
+  return active.reverse();
+}
+
 function pushScore(map, key, value, identity) {
   if (!key || key === '|') return;
   const old = map.get(key) || { ...identity, score: 0, evidence: 0 };
@@ -56,7 +81,7 @@ export function deriveProfile(events = [], { now = new Date() } = {}) {
   const artists = new Map();
   const inferred = new Map();
 
-  for (const event of events) {
+  for (const event of activeTasteEvents(events)) {
     const title = text(event.song?.title);
     const artist = text(event.song?.artist);
     const weight = decayedWeight(event, now);

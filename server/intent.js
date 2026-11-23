@@ -5,7 +5,7 @@ const REPLIES = Object.freeze({
   previous: '回到上一首。',
   stop: '好，音乐停下了。',
   favorite: '记下了，这首加入喜欢。',
-  dislike: '记住了，以后少放这类。',
+  dislike: '记住了，以后不放这首。',
   volume_up: '音量调大一点。',
   volume_down: '音量调小一点。',
 });
@@ -35,5 +35,9 @@ export function classifyDirectControl(input = '') {
   if (/^(?:请|麻烦)?(?:停止播放|停止音乐|关掉音乐|不要放了)(?:吧)?$/.test(text)) return control('stop');
   if (/^(?:请|麻烦)?(?:收藏(?:一下)?(?:这首(?:歌)?)?|喜欢这首(?:歌)?)(?:吧)?$/.test(text)) return control('favorite');
   if (/^(?:我)?(?:不喜欢这首(?:歌)?|这首(?:歌)?不好听|以后别放这首(?:歌)?)(?:了|吧)?$/.test(text)) return control('dislike');
+  if (/^(?:这首(?:歌)?)?(?:真的|真|太|超|挺)?好听(?:啊|呀|吧|哦)?$/.test(text)) return control('favorite');
+  if (/^(?:我)?(?:很|挺|超|好)?喜欢(?:这首(?:歌)?)?(?:啊|呀|吧)?$/.test(text)) return control('favorite');
+  if (/^(?:请|麻烦)?(?:帮我)?记下(?:来)?(?:这首(?:歌)?)?(?:吧)?$/.test(text)) return control('favorite');
+  if (/^(?:这首(?:歌)?)?不错(?:啊|呀|吧)?$/.test(text)) return control('favorite');
   return null;
 }

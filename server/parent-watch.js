@@ -12,3 +12,4 @@ export function watchParentFromEnv({ intervalMs = 1500 } = {}) {
   timer.unref();
   return timer;
 }
+

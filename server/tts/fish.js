@@ -4,6 +4,7 @@
 import { config } from '../config.js';
 import { getSecret } from '../secrets.js';
 import { getSettings } from '../settings.js';
+import { abortReason, throwIfAborted, withAbort } from './abort.js';
 
 export const ext = 'mp3';
 
@@ -23,10 +24,11 @@ export function currentFishConfig() {
   };
 }
 
-export async function openStream(text, { signal } = {}) {
-  const { apiKey, model, referenceId } = currentFishConfig();
+export async function openStream(text, { signal, fetchFn = fetch, cfg = currentFishConfig() } = {}) {
+  throwIfAborted(signal);
+  const { apiKey, model, referenceId } = cfg;
   if (!apiKey) throw new Error('Fish API Key 未配置，语音不可用');
-  const res = await fetch('https://api.fish.audio/v1/tts', {
+  const res = await withAbort(fetchFn('https://api.fish.audio/v1/tts', {
     method: 'POST',
     signal,
     headers: {
@@ -39,25 +41,31 @@ export async function openStream(text, { signal } = {}) {
       reference_id: referenceId || undefined,
       format: 'mp3',
     }),
-  });
+  }), signal);
   if (!res.ok) throw new Error(`fish tts ${res.status}: ${await res.text().catch(() => '')}`);
   if (!res.body) throw new Error('fish tts 返回空音频流');
   return res.body;
 }
 
-export async function* stream(text, { signal } = {}) {
-  const body = await openStream(text, { signal });
+export async function* stream(text, options = {}) {
+  const { signal } = options;
+  const body = await openStream(text, options);
   const reader = body.getReader();
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (value?.length) yield Buffer.from(value);
-  }
+  const abort = () => { Promise.resolve(reader.cancel(abortReason(signal))).catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    while (true) {
+      const { value, done } = await withAbort(reader.read(), signal);
+      throwIfAborted(signal);
+      if (done) break;
+      if (value?.length) yield Buffer.from(value);
+    }
+  } finally { signal?.removeEventListener('abort', abort); reader.releaseLock(); }
 }
 
-export async function synthesize(text) {
+export async function synthesize(text, options = {}) {
   const chunks = [];
-  for await (const chunk of stream(text)) chunks.push(chunk);
+  for await (const chunk of stream(text, options)) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
 

@@ -1,6 +1,6 @@
 // 长期记忆：DJ 在互动中觉得"值得长期记住的关于 ta 的事"，逐条沉淀到 user/memory.md（人可读、可手动增删改）。
 // context.js 每次开节目都把它注入 prompt → Claudio 越聊越懂 ta，用于聊天 / 推荐 / 做歌单。
-// 设计：只 append、不整文件重写——保住用户手动写的内容；按正文去重，避免同一件事反复记。
+// 设计：只 append、不整文件重写——保住老板手动写的内容；按正文去重，避免同一件事反复记。
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';

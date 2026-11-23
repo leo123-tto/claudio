@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0a">
+<title>申请收听 Claudio</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="stylesheet" href="/styles.css?v=15">
+</head>
+<body>
+<main class="gate">
+  <span class="logo">CLAUDIO</span>
+  <form id="apply-form" class="apply" autocomplete="off">
+    <input id="name" maxlength="20" placeholder="称呼" required>
+    <textarea id="note" maxlength="200" rows="3" placeholder="你是谁 / 怎么认识的" required></textarea>
+    <input id="wechat" maxlength="40" placeholder="微信号（选填）">
+    <div id="captcha"></div>
+    <button class="btn-solid" type="submit">提交申请</button>
+  </form>
+  <p id="msg" class="result"></p>
+</main>
+<script src="/apply.js" type="module"></script>
+</body>
+</html>

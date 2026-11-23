@@ -7,28 +7,32 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
+import { throwIfAborted } from './abort.js';
 
 export const ext = 'wav';
 
-export async function synthesize(text) {
+export async function synthesize(text, { signal } = {}) {
+  throwIfAborted(signal);
   const voice = config.tts.say.voice;
   const tmp = path.join(os.tmpdir(), `claudio-say-${process.pid}-${crypto.randomUUID()}.wav`); // 随机量防同毫秒并发撞名写坏
 
-  await new Promise((resolve, reject) => {
-    const args = ['-o', tmp, '--file-format=WAVE', '--data-format=LEI16@24000'];
-    if (voice) args.push('-v', voice);
-    args.push(text);
+  try {
+    await new Promise((resolve, reject) => {
+      const args = ['-o', tmp, '--file-format=WAVE', '--data-format=LEI16@24000'];
+      if (voice) args.push('-v', voice);
+      args.push(text);
 
-    const child = spawn('say', args);
-    let err = '';
-    child.stderr.on('data', (d) => (err += d));
-    child.on('error', reject);
-    child.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(`say exit ${code}: ${err}`)),
-    );
-  });
+      const child = spawn('say', args, { signal });
+      let err = '';
+      child.stderr.on('data', (d) => (err += d));
+      child.on('error', reject);
+      child.on('close', (code) =>
+        code === 0 ? resolve() : reject(new Error(`say exit ${code}: ${err}`)),
+      );
+    });
 
-  const buf = fs.readFileSync(tmp);
-  fs.rmSync(tmp, { force: true });
-  return buf;
+    throwIfAborted(signal);
+    const buf = fs.readFileSync(tmp);
+    return buf;
+  } finally { fs.rmSync(tmp, { force: true }); }
 }

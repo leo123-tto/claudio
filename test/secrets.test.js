@@ -15,12 +15,29 @@ test('API 密钥只落在权限 0600 的本地文件，并且公开状态只有�
   });
 
   assert.equal(store.get('deepseekApiKey'), 'env-deepseek');
-  assert.deepEqual(store.status(), { deepseekApiKey: true, fishApiKey: false });
+  assert.deepEqual(store.status(), {
+    deepseekApiKey: true,
+    fishApiKey: false,
+    localLlmApiKey: false,
+    localTtsApiKey: false,
+  });
 
-  store.update({ deepseekApiKey: 'local-deepseek', fishApiKey: 'local-fish' });
+  store.update({
+    deepseekApiKey: 'local-deepseek',
+    fishApiKey: 'local-fish',
+    localLlmApiKey: 'local-llm',
+    localTtsApiKey: 'local-tts',
+  });
   assert.equal(store.get('deepseekApiKey'), 'local-deepseek');
   assert.equal(store.get('fishApiKey'), 'local-fish');
-  assert.deepEqual(store.status(), { deepseekApiKey: true, fishApiKey: true });
+  assert.equal(store.get('localLlmApiKey'), 'local-llm');
+  assert.equal(store.get('localTtsApiKey'), 'local-tts');
+  assert.deepEqual(store.status(), {
+    deepseekApiKey: true,
+    fishApiKey: true,
+    localLlmApiKey: true,
+    localTtsApiKey: true,
+  });
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.doesNotMatch(JSON.stringify(store.status()), /local-|env-/);
 

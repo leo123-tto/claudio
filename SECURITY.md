@@ -6,4 +6,6 @@
 
 ## 本地敏感数据
 
-Claudio 的密钥和个人数据只应保存在 `.env`、被忽略的 `user/` / `cache/`（含 Grok 订阅 token），或 macOS 的 `~/Library/Application Support/com.claudio.fm`。提交前请运行密钥扫描并检查 `git status`。
+Claudio 的密钥和个人数据只应保存在本机：`.env`、被 Git 忽略的 `user/` / `cache/`（设置、`secrets.json`、日志）；容器部署时在 `CLAUDIO_DATA_DIR` 指的数据目录里。自己机器的地址、主机名也写 `.env`，不写进代码。
+
+提交前检查 `git status` 和 `git diff --cached`。密钥一旦推上公开仓库，先到对应平台吊销重发，再处理提交记录。

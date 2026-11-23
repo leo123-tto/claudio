@@ -10,7 +10,13 @@ test('高置信度播放器指令直接映射为动作', () => {
   assert.equal(classifyDirectControl('上一首').action, 'previous');
   assert.equal(classifyDirectControl('停止播放').action, 'stop');
   assert.equal(classifyDirectControl('收藏这首').action, 'favorite');
-  assert.equal(classifyDirectControl('这首不好听').action, 'dislike');
+  assert.equal(classifyDirectControl('好听').action, 'favorite');
+  assert.equal(classifyDirectControl('喜欢').action, 'favorite');
+  assert.equal(classifyDirectControl('记下来').action, 'favorite');
+  assert.equal(classifyDirectControl('这首不错').action, 'favorite');
+  assert.deepEqual(classifyDirectControl('这首不好听'), {
+    intent: 'control', action: 'dislike', actionValue: 0, reply: '记住了，以后不放这首。',
+  });
 });
 
 test('音量指令支持增减和指定百分比', () => {

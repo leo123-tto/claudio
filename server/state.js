@@ -4,64 +4,64 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 
-const FILE = config.paths.state;
 const MAX_MESSAGES = 200;
 const MAX_PLAYS = 500;
-
 const defaultState = { messages: [], plays: [], favs: [] };
+const sourcesOf = (fav) => Array.isArray(fav.sources) ? fav.sources : [fav.source || 'unknown'];
+const songKey = (song) => [song?.title, song?.artist].map((part) => String(part || '').replace(/\s+/g, ' ').trim().toLowerCase()).join('|');
 
-let state = load();
-
-function load() {
+export function createStateStore(file = config.paths.state) {
+  let state;
   try {
-    return { ...structuredClone(defaultState), ...JSON.parse(fs.readFileSync(FILE, 'utf8')) };
-  } catch (e) {
-    // 文件不存在是首次启动的正常情况；存在却解析失败要告警（历史可能丢失）
-    if (e.code !== 'ENOENT') console.warn('[state] 读档失败，重置为空档：', e.message);
-    return structuredClone(defaultState);
+    state = { ...structuredClone(defaultState), ...JSON.parse(fs.readFileSync(file, 'utf8')) };
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[state] 读档失败，重置为空档：', error.message);
+    state = structuredClone(defaultState);
   }
-}
-
-function persist() {
-  try {
-    fs.mkdirSync(path.dirname(FILE), { recursive: true });
-    const tmp = `${FILE}.tmp`; // 原子写：先写临时文件再 rename，避免写一半崩溃截断成非法 JSON
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-    fs.renameSync(tmp, FILE);
-  } catch (e) {
-    console.warn('[state] 持久化失败：', e.message);
+  for (const key of Object.keys(defaultState)) {
+    if (!Array.isArray(state[key])) state[key] = [];
   }
+  function persist() {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const temp = `${file}.tmp`;
+      fs.writeFileSync(temp, JSON.stringify(state, null, 2));
+      fs.renameSync(temp, file);
+    } catch (error) { console.warn('[state] 持久化失败：', error.message); }
+  }
+  return {
+    addMessage(role, content) {
+      state.messages.push({ role, content, at: Date.now() });
+      if (state.messages.length > MAX_MESSAGES) state.messages = state.messages.slice(-MAX_MESSAGES);
+      persist();
+    },
+    recentMessages(n = 10) { return state.messages.slice(-n); },
+    addPlay(song) {
+      state.plays.push({ ...song, at: Date.now() });
+      if (state.plays.length > MAX_PLAYS) state.plays = state.plays.slice(-MAX_PLAYS);
+      persist();
+    },
+    recentPlays(n = 20) { return state.plays.slice(-n); },
+    addFav(fav) {
+      const source = fav.source || 'button';
+      const existing = state.favs.find((entry) => songKey(entry) === songKey(fav));
+      if (existing) existing.sources = [...new Set([...sourcesOf(existing), source])];
+      else state.favs.push({ ...fav, sources: [source], at: Date.now() });
+      if (state.favs.length > 500) state.favs = state.favs.slice(-500);
+      persist();
+      return state.favs.length;
+    },
+    removeFav(song) {
+      state.favs = state.favs.flatMap((entry) => {
+        if (songKey(entry) !== songKey(song)) return [entry];
+        const sources = sourcesOf(entry).filter((source) => source !== 'button');
+        return sources.length ? [{ ...entry, sources }] : [];
+      });
+      persist();
+      return state.favs.length;
+    },
+    recentFavs(n = 10) { return state.favs.slice(-n); },
+  };
 }
 
-export function addMessage(role, content) {
-  state.messages.push({ role, content, at: Date.now() });
-  if (state.messages.length > MAX_MESSAGES) state.messages = state.messages.slice(-MAX_MESSAGES);
-  persist();
-}
-
-export function recentMessages(n = 10) {
-  return state.messages.slice(-n);
-}
-
-export function addPlay(song) {
-  state.plays.push({ ...song, at: Date.now() });
-  if (state.plays.length > MAX_PLAYS) state.plays = state.plays.slice(-MAX_PLAYS);
-  persist();
-}
-
-export function recentPlays(n = 20) {
-  return state.plays.slice(-n);
-}
-
-// 收藏：记录时间 + 当时的情况（mode/mood），慢慢沉淀进品味
-export function addFav(fav) {
-  if (!state.favs) state.favs = [];
-  state.favs.push({ ...fav, at: Date.now() });
-  if (state.favs.length > 500) state.favs = state.favs.slice(-500);
-  persist();
-  return state.favs.length;
-}
-
-export function recentFavs(n = 10) {
-  return (state.favs || []).slice(-n);
-}
+export const { addMessage, recentMessages, addPlay, recentPlays, addFav, removeFav, recentFavs } = createStateStore();

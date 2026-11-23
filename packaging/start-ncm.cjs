@@ -2,7 +2,8 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 
-const packageRoot = path.resolve(__dirname, '../app/node_modules/NeteaseCloudMusicApi')
+// 盒子容器里由 NCM_PACKAGE_ROOT 指定；没设就在 ../app/node_modules
+const packageRoot = process.env.NCM_PACKAGE_ROOT || path.resolve(__dirname, '../app/node_modules/NeteaseCloudMusicApi')
 const { buildModuleDefs } = require('./ncm-modules.cjs')
 
 async function main() {

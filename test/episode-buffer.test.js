@@ -1,0 +1,126 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { setImmediate as tick } from 'node:timers/promises';
+import { createEpisodeBuffer } from '../server/episode-buffer.js';
+const deferred = () => { let resolve,reject; const promise=new Promise((a,b)=>{resolve=a;reject=b;}); return {promise,resolve,reject}; };
+const ep = (id) => ({ id, say: '歇一会儿', queue:[{type:'song',url:'https://music.126.net/a',meta:{id,title:id,artist:'歌手'}}] });
+async function settle() { for(let i=0;i<5;i++) await tick(); }
+
+test('adopt拒绝已经盖上旧epoch的远程节目，不得重新盖章复活', (t) => {
+  const service = createEpisodeBuffer({ enabled: () => false });
+  t.after(() => service.dispose());
+  const old = { ...ep('old-remote'), epoch: service.snapshot().epoch };
+  service.invalidate();
+  assert.throws(() => service.adopt(old, 'remote-claim'), /更新|失效/);
+  assert.equal(old.epoch, 0);
+  assert.deepEqual(service.exclusions(), []);
+});
+
+test('buffer填两期，claim不提交，重复claim不重取，started幂等且补齐', async (t) => {
+  let count=0; const history=[],events=[];
+  const service=createEpisodeBuffer({build:async()=>ep(String(++count)),commit:e=>history.push(e.id),emit:e=>events.push(e)});
+  t.after(()=>service.dispose()); service.ensure(); await settle();
+  assert.equal(service.snapshot().buffered,2); assert.deepEqual(history,[]);
+  const claimed=await service.claim('claim-1'); await settle();
+  assert.equal((await service.claim('claim-1')).id,claimed.id);
+  assert.deepEqual(history,[]); assert.equal(events.some(e=>e.kind==='episode'),false);
+  service.start(claimed.id,'claim-1'); service.start(claimed.id,'claim-1');
+  assert.deepEqual(history,[claimed.id]); await settle(); assert.equal(service.snapshot().buffered,2);
+});
+test('空buffer立即返回null且仅一条生成车道，chat抢占并恢复补充', async (t) => {
+  const work=[]; let inFlight=0,max=0;
+  const service=createEpisodeBuffer({build:({signal})=>{
+    inFlight++; max=Math.max(max,inFlight); const task=deferred(); work.push(task);
+    signal.addEventListener('abort',()=>task.reject(signal.reason),{once:true});
+    return task.promise.finally(()=>inFlight--);
+  }}); t.after(()=>service.dispose());
+  assert.equal(await service.claim('empty'),null); await settle(); assert.equal(work.length,1);
+  const chat=service.runForeground(async()=>{inFlight++;max=Math.max(max,inFlight);inFlight--;return 'chat';});
+  assert.equal(await chat,'chat'); await settle(); assert.equal(work.length,2); assert.equal(max,1);
+  work[1].resolve(ep('new')); await settle(); assert.equal(service.snapshot().buffered,1);
+});
+test('新chat取消旧chat，旧finally不解除新任务状态', async(t)=>{
+  const service=createEpisodeBuffer({enabled:()=>false,build:()=>ep('unused')});t.after(()=>service.dispose());
+  const old=service.runForeground(signal=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true})));
+  const rejected=assert.rejects(old,/替换/);await settle();
+  const newer=deferred();const current=service.runForeground(()=>newer.promise);await rejected;await settle();
+  assert.equal(service.snapshot().generating,true);newer.resolve('new');assert.equal(await current,'new');
+});
+test('release和15分钟过期直接丢弃，epoch使旧claim失效并拒绝旧任务回写',async(t)=>{
+  let clock=1000,count=0;const service=createEpisodeBuffer({now:()=>clock,build:async()=>ep(String(++count))});t.after(()=>service.dispose());
+  service.ensure();await settle();const one=await service.claim('one');assert.equal(service.release('one'),true);assert.throws(()=>service.start(one.id,'one'),/失效/);
+  const two=await service.claim('two');clock+=15*60*1000;assert.throws(()=>service.start(two.id,'two'),/失效/);
+  await settle();const three=await service.claim('three');const next=service.invalidate();assert.equal(next,1);assert.throws(()=>service.start(three.id,'three'),/失效/);
+  await assert.rejects(service.claim('three'),/更新/);
+});
+test('后台旧任务即使忽略abort并成功返回，也不能污染新epoch',async(t)=>{
+  const first=deferred();let count=0;const service=createEpisodeBuffer({build:()=>++count===1?first.promise:Promise.resolve(ep(`new-${count}`))});t.after(()=>service.dispose());
+  service.ensure();await settle();service.invalidate();first.resolve(ep('old'));await settle();assert.equal(service.snapshot().next.id,'new-2');assert.equal(service.snapshot().buffered,2);
+});
+test('pending语音独立完成、失败重试、开始无声后不再插入',async(t)=>{
+  let count=0; const voices=new Map(),events=[];
+  const service=createEpisodeBuffer({capacity:1,build:async()=>ep(String(++count)),emit:e=>events.push(e),synthesize:(text,{signal})=>{
+    const task=deferred();voices.set(count,task);return task.promise;
+  }});t.after(()=>service.dispose());service.ensure();await settle();
+  const one=await service.claim('one');assert.equal(one.voice.status,'pending');assert.equal(one.queue[0].type,'song');
+  voices.get(1).resolve({url:'/tts/one.mp3'});await settle();assert.equal(one.voice.status,'ready');assert.equal(one.queue[0].type,'tts');assert.equal(events.some(e=>e.kind==='voiceReady'&&e.episodeId===one.id),true);
+  const two=await service.claim('two');service.start(two.id,'two');voices.get(2).resolve({url:'/tts/two.mp3'});await settle();assert.equal(two.voice.status,'skipped');assert.equal(two.queue[0].type,'song');
+});
+test('语音失败pending可重试成功，40分钟旧口播保留歌并跳过',async(t)=>{
+  let clock=1,attempt=0;const events=[];
+  const service=createEpisodeBuffer({capacity:1,now:()=>clock,build:async()=>ep('one'),emit:e=>events.push(e),synthesize:async()=>{if(++attempt===1)throw Error('暂时失败');return {url:'/tts/ok.mp3'};}});t.after(()=>service.dispose());
+  service.ensure();await settle();assert.equal(service.getVoice('one').status,'pending');service.retryVoices();await settle();assert.equal(service.getVoice('one').status,'ready');
+  clock+=41*60*1000;const one=await service.claim('one');assert.equal(one.voice.status,'skipped');assert.equal(one.say,'歇一会儿');assert.equal(one.queue[0].type,'song');
+});
+test('离线或反复失败跳过口播；重试退避30/60/120秒且成功复位',async(t)=>{
+  let count=0;const delays=[],callbacks=[];
+  const service=createEpisodeBuffer({hasClients:()=>true,build:async()=>{if(++count<4)throw Error('失败');return ep('ready');},capacity:1,setTimer:(cb,delay)=>{callbacks.push(cb);delays.push(delay);return 1;},clearTimer:()=>{}});t.after(()=>service.dispose());
+  service.ensure();await settle();callbacks.shift()();await settle();callbacks.shift()();await settle();callbacks.shift()();await settle();assert.deepEqual(delays,[30000,60000,120000]);assert.equal(service.snapshot().buffered,1);
+  const offline=createEpisodeBuffer({capacity:1,build:async()=>ep('offline'),offline:()=>true,synthesize:()=>assert.fail('离线不合成')});t.after(()=>offline.dispose());offline.ensure();await settle();assert.equal(offline.getVoice('offline').status,'skipped');
+});
+test('已经开始的claim不能跨epoch或过期再次下发，start重试仍幂等',async(t)=>{
+  let clock=1,count=0;const service=createEpisodeBuffer({now:()=>clock,build:async()=>ep(String(++count))});t.after(()=>service.dispose());service.ensure();await settle();
+  const one=await service.claim('one');service.start(one.id,'one');service.invalidate();await assert.rejects(service.claim('one'),/失效/);assert.equal(service.start(one.id,'one').id,one.id);
+  await settle();const two=await service.claim('two');service.start(two.id,'two');clock+=16*60*1000;await assert.rejects(service.claim('two'),/失效/);
+});
+test('第二期低优先级可被chat抢占，生成时避开buffer、claim和current',async(t)=>{
+  let count=0;const captured=[];const second=deferred();let secondSignal;
+  const service=createEpisodeBuffer({build:({signal,excludeSongs})=>{
+    captured.push(excludeSongs.map(song=>song.id));count++;
+    if(count===2){secondSignal=signal;signal.addEventListener('abort',()=>second.reject(signal.reason),{once:true});return second.promise;}
+    return Promise.resolve(ep(String(count)));
+  }});t.after(()=>service.dispose());service.ensure();await settle();
+  assert.deepEqual(captured[1],['1']);assert.equal(service.snapshot().buffered,1);
+  assert.equal(await service.runForeground(async()=> 'chat'),'chat');assert.equal(secondSignal.aborted,true);await settle();
+  const first=await service.claim('first');await settle();const next=await service.claim('next');service.start(first.id,'first');await settle();
+  const held=service.exclusions().map(song=>song.id);assert.ok(held.includes(first.id));assert.ok(held.includes(next.id));assert.ok(service.snapshot().buffered>0);
+  assert.ok(captured.at(-1).includes(first.id));
+});
+
+test('睡眠定时 idle：停掉在做的后台节目、不再补，下次领取自动恢复', async (t) => {
+  const work = [];
+  const service = createEpisodeBuffer({ build: ({ signal }) => {
+    const task = deferred(); work.push(task);
+    signal.addEventListener('abort', () => task.reject(signal.reason), { once: true });
+    return task.promise;
+  } });
+  t.after(() => service.dispose());
+  service.ensure(); await settle();
+  assert.equal(work.length, 1);
+  service.idle(); await settle();
+  await assert.rejects(work[0].promise, /睡眠定时/);
+  assert.equal(work.length, 1);
+  assert.equal(service.snapshot().buffered, 0);
+  assert.equal(await service.claim('morning'), null); await settle();
+  assert.equal(work.length, 2);
+});
+
+test('没人在听就不备节目，有人连上后 ensure 才开始', async (t) => {
+  let listeners = 0; let builds = 0;
+  const service = createEpisodeBuffer({ listening: () => listeners > 0, build: async () => ep(String(++builds)) });
+  t.after(() => service.dispose());
+  service.ensure(); await settle();
+  assert.equal(builds, 0);
+  listeners = 1; service.ensure(); await settle();
+  assert.equal(service.snapshot().buffered, 2);
+});

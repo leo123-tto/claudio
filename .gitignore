@@ -1,18 +1,31 @@
 node_modules/
 .env
-.env.local
+.env.*
+!.env.example
 cache/
 !cache/tts/.gitkeep
-/user/
 *.log
-.DS_Store
-.playwright-cli/
-runtime/
+logs/
+data/
+*.bak
+*.orig
+
+# 个人数据：口味、收藏、记忆、作息（模板在 packaging/default-user/）
+/user/
+config.local.json
 secrets.json
-grok-auth.json
 *.pem
 *.key
+# 上传前检查用的真值黑名单（含真实地址 / 主机名），只在本机
+.publish-denylist
+.DS_Store
+.playwright-cli/
+grok-auth.json
 
-# Tauri 构建产物（cargo 可重新生成；老板：保留 Tauri 但 target/gen 不入库）
-src-tauri/target/
-src-tauri/gen/
+
+# 旧 Mac App 的本机构建残留（App 2026-11-23 已去掉；目录删不删老板定，删之前别让它进仓库）
+src-tauri/
+runtime/
+
+# 私有音源插件（server/sources.js 按目录加载；不进仓库、不进公开快照）
+/plugins

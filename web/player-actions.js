@@ -5,7 +5,12 @@ export function executePlayerAction(control = {}, handlers = {}) {
   if (['pause', 'resume', 'next', 'previous', 'stop', 'favorite', 'dislike'].includes(action)) {
     const handler = handlers[action];
     if (typeof handler !== 'function') return false;
-    handler();
+    if (handler() === false) return false;
+    return true;
+  }
+  if (action === 'output') {
+    if (typeof handlers.output !== 'function' || !control.outputId) return false;
+    handlers.output(control.outputId);
     return true;
   }
   if (action === 'volume_up' || action === 'volume_down' || action === 'volume_set') {

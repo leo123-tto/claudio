@@ -36,6 +36,20 @@ test('音量动作会限幅到 0–100', () => {
   assert.equal(volume, 100);
 });
 
+test('没有在放的歌时，收藏动作可以明确失败', () => {
+  assert.equal(executePlayerAction({ action: 'favorite' }, { favorite: () => false }), false);
+});
+
+test('切房间把设备交给输出处理', () => {
+  let seen = '';
+  assert.equal(executePlayerAction(
+    { action: 'output', outputId: 'airplay:living' },
+    { output: (id) => { seen = id; } },
+  ), true);
+  assert.equal(seen, 'airplay:living');
+  assert.equal(executePlayerAction({ action: 'output' }, { output: () => {} }), false);
+});
+
 test('未知动作不执行', () => {
   assert.equal(executePlayerAction({ action: 'dance' }, {}), false);
   assert.equal(executePlayerAction({ action: 'none' }, {}), false);

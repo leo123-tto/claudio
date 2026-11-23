@@ -4,7 +4,7 @@ import { parseFavoriteSongs } from './recommendation.js';
 
 const HEADER = `# 我喜欢的歌曲
 
-> 这里的歌曲只用来分析你的口味和寻找相邻的小众音乐；发现模式不会机械重播这些原曲。
+> 这里的歌曲用来记住你的口味。自动推荐不会机械重播这些原曲，也会搭配新风格、当下流行和老歌。
 `;
 
 function clean(value) {
@@ -57,12 +57,64 @@ export function renderFavoritesMarkdown(songs = []) {
 
 export function createFavoritesStore({ file, fetchPlaylistTracks }) {
   if (typeof fetchPlaylistTracks !== 'function') throw new TypeError('缺少歌单读取器');
+  const sourcesFile = `${file}.sources.json`;
+  const knownSources = new Set(['import', 'button', 'chat', 'unknown']);
   function read() {
-    try { return parseFavoriteSongs(fs.readFileSync(file, 'utf8')); }
+    try {
+      const songs = parseFavoriteSongs(fs.readFileSync(file, 'utf8'));
+      let sources = {};
+      try { sources = JSON.parse(fs.readFileSync(sourcesFile, 'utf8')); } catch { /* 旧曲库来源未知 */ }
+      return songs.map((song) => {
+        const saved = sources?.[songKey(song)];
+        const list = Array.isArray(saved) ? saved.filter((source) => knownSources.has(source)) : [];
+        return { ...song, sources: list.length ? [...new Set(list)] : ['unknown'] };
+      });
+    }
     catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   }
+  function write(songs) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const sourceTemp = `${sourcesFile}.tmp`;
+    fs.writeFileSync(sourceTemp, JSON.stringify(Object.fromEntries(songs.map((song) => [songKey(song), song.sources]))));
+    fs.renameSync(sourceTemp, sourcesFile);
+    const temp = `${file}.tmp`;
+    fs.writeFileSync(temp, renderFavoritesMarkdown(songs));
+    fs.renameSync(temp, file);
+  }
+  function remember(incoming, source) {
+    if (!knownSources.has(source) || source === 'unknown') throw new TypeError('收藏来源无效');
+    const songs = read();
+    const merged = mergeFavoriteSongs(songs, incoming);
+    const byKey = new Map(songs.map((song) => [songKey(song), song]));
+    const incomingKeys = new Set(incoming.map(songKey));
+    const withSources = merged.songs.map((song) => {
+      const sources = [...(byKey.get(songKey(song))?.sources || [])];
+      if (incomingKeys.has(songKey(song)) && !sources.includes(source)) sources.push(source);
+      return { ...song, sources };
+    });
+    write(withSources);
+    return { added: merged.added, duplicates: merged.duplicates, total: withSources.length };
+  }
   return {
+    read,
+    list: read,
     summary() { return { total: read().length }; },
+    isFavorite(song) {
+      return Boolean(read().find((entry) => songKey(entry) === songKey(song))?.sources.includes('button'));
+    },
+    rememberSong({ title, artist } = {}, { source = 'button' } = {}) {
+      return remember([{ title, artist }], source);
+    },
+    forgetSong(song) {
+      const songs = read();
+      const index = songs.findIndex((entry) => songKey(entry) === songKey(song));
+      if (index < 0 || !songs[index].sources.includes('button')) return { removed: 0, deleted: 0, total: songs.length };
+      songs[index].sources = songs[index].sources.filter((source) => source !== 'button');
+      const deleted = songs[index].sources.length ? 0 : 1;
+      if (deleted) songs.splice(index, 1);
+      write(songs);
+      return { removed: 1, deleted, total: songs.length };
+    },
     async importPlaylist(input) {
       const playlistId = parsePlaylistId(input);
       const tracks = await fetchPlaylistTracks(playlistId);
@@ -70,18 +122,15 @@ export function createFavoritesStore({ file, fetchPlaylistTracks }) {
         throw new Error('没有读取到歌曲；请确认歌单存在、可公开访问，或已配置网易云登录 Cookie');
       }
       const received = tracks.length;
-      const merged = mergeFavoriteSongs(read(), tracks);
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const temp = `${file}.tmp`;
-      fs.writeFileSync(temp, renderFavoritesMarkdown(merged.songs));
-      fs.renameSync(temp, file);
+      const merged = remember(tracks, 'import');
       return {
         playlistId,
         received,
         added: merged.added,
         duplicates: merged.duplicates,
-        total: merged.songs.length,
+        total: merged.total,
       };
     },
   };
 }
+

@@ -32,7 +32,8 @@ export async function refresh() {
     const c = j.current_condition?.[0];
     if (!c) throw new Error('no current_condition');
     const area = j.nearest_area?.[0];
-    const cityName = area?.areaName?.[0]?.value || city || '';
+    // 配了城市就用配的名字：wttr.in 回的是测站名（大城市常回成某个测站名）
+    const cityName = city || area?.areaName?.[0]?.value || '';
     const desc = CODE_ZH[c.weatherCode] || c.weatherDesc?.[0]?.value?.trim() || '';
     const tempC = c.temp_C, feels = c.FeelsLikeC, humidity = c.humidity;
     const summary = `${cityName ? cityName + '，' : ''}${desc} ${tempC}°C（体感 ${feels}°C）湿度 ${humidity}%`;
