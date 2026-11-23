@@ -1,0 +1,31 @@
+name: 提建议
+description: 想要的新功能、想改进的地方
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: 想要什么
+      description: 在什么场景下，想做到什么
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 现在哪里不方便
+  - type: dropdown
+    id: side
+    attributes:
+      label: 主要是哪一端
+      multiple: true
+      options:
+        - 手机浏览器
+        - 电脑浏览器
+        - 服务端 / DJ 选歌
+        - 公用版
+  - type: checkboxes
+    id: pr
+    attributes:
+      label: 自己来做
+      options:
+        - label: 我想自己提 PR 实现它

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全问题
+    url: https://github.com/leo123-tto/claudio/blob/main/SECURITY.md
+    about: 漏洞和泄露请按这里的办法私下报告，别开公开 issue

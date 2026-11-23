@@ -1,0 +1,49 @@
+name: 报 bug
+description: 哪里坏了、不对劲
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 出了什么问题
+      description: 看到了什么，本来应该是什么样
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 怎么复现
+      placeholder: |
+        1. 打开…
+        2. 点…
+        3. 看到…
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: 在哪里出的问题
+      options:
+        - 公开版网站
+        - 自己部署的个人版
+        - 自己部署的公用版
+        - 本地开发
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: 设备和浏览器
+      placeholder: 如 iPhone 15 / iOS 18 / Safari，或 Mac / Chrome 130
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本号
+      description: 设置 / 账号面板角落的版本号；没有就留空
+  - type: textarea
+    id: extra
+    attributes:
+      label: 截图、录屏或报错
+      description: 浏览器控制台的报错很有用。别贴 API key、cookie、真实账号和日志里的私人信息。

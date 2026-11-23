@@ -2,6 +2,15 @@
 
 > Claude 当 DJ 大脑：读懂你的听歌习惯 → 规划声音 → 像 DJ 那样播报。
 
+## 先读这段
+
+- **是什么**：个人 AI 电台。Node.js 服务（`server/`）+ 原生 JS 网页（`web/`）：大模型选歌、写口播，TTS 念出来，网页播放器自动连播。
+- **两种模式**：个人版（默认，一个人用，口味在 `user/`）；公用版（`CLAUDIO_MODE=public`，邀请制多人，代码在 `server/public/`，进门、设备、额度交给外部 hub，见 `docs/hub-api.md`）。两版共用 `web/`。
+- **能力开关**：网页先问 `GET /api/mode` 拿 `{mode, features}`。`web/index.html` 里带 `data-cap="x"` 的控件只在 `features.x` 为真时露出；`web/boot.js` 据此加载 `app.js`（个人版引擎）或 `public.js`（公用版引擎）。个人版开关在 `server/index.js` 和 `boot.js` 的 `PERSONAL`，公用版在 `server/public/app.js`。加按钮的完整步骤见 `docs/上手指南.md`。
+- **跑起来 / 测试**：`npm install` → `npm run ncm` → `npm run dev`（:8080）；`npm test`（`node --test`，不联网），提交前必须全过。
+- **红线**：不提交密钥、cookie、`.env`、`user/`、日志、内网地址；不写绕过平台限制、伪装客户端的代码；音源只走插件接口（`server/sources.js`），仓库里不放具体音源；前端不写内联脚本、不引外部资源（公用版有 CSP）。
+- **改动原则**：最小必要改动、沿用现有风格、新依赖先说明。流程见 `CONTRIBUTING.md`。
+
 本文件是项目**总文档**，给所有在这个仓库里工作的 AI / 人看。它只放**稳定的总览**，不记流水账。
 
 - 📈 开发进度：`docs/progress.md`（**进度只写这里，不要写进本文件**）
@@ -54,7 +63,7 @@ TTS 把稿子合成人声，网页播放器一边放歌一边念词，并能按�
 | 层 | 选型 | 说明 |
 |---|---|---|
 | 大脑 | 可插拔三家：本地 OpenAI 兼容服务（默认，DeepSeek V4.1 Flash）/ Claude 订阅（CLI）/ DeepSeek 官方 API | ChatGPT、Grok、Ornith、Agent2API 于 2026-10-31 下线，旧设置读进来自动迁到本地服务。不自动回退 |
-| 音乐 | NeteaseCloudMusicApi 4.32.0（本地实例，外部服务；**没有解灰**）+ 备用音源插件（`server/sources.js`，插件不进仓库） | search / song_url / lyric / recommend。网易云拿不到（灰、无版权、只有试听、搜索限流）自动回落备用音源（插件放数据目录 `plugins/`，不随仓库分发） |
+| 音乐 | NeteaseCloudMusicApi 4.32.0（本地实例，外部服务；**没有解灰**）；音源可用插件扩展（`server/sources.js`） | search / song_url / lyric / recommend。网易云拿不到（灰、无版权、只有试听、搜索限流）时问插件 |
 | TTS | 可插拔，默认 `pc5090`（自建 GPU 机上的 Fish S2-Pro，音色 `claudio`），Fish 云端手动备用 | `server/tts/`：pc5090 / fish / say，失败不自动回退；语音服务不在时这期跳过口播只放歌。可经 ssh 隧道连到 WSL 上的服务（本机 `127.0.0.1:18081` → 远端），语音档没起来时经 ssh 叫 gpuctl 拉起（冷启动约 2 分钟）；主机名和地址都在 `.env`。整段合成、带语气提示，网页 0.9 倍播放；点歌时首句单独先合成开口、其余整段接上（`PC5090_SPLIT=1` 恢复逐句）。装在 GPU 机的 Windows 本机时不开隧道，直连 WSL，经 `wsl.exe` 调 gpuctl（`PC5090_GPUCTL=wsl`） |
 | 后端 | Node.js (ESM) + Express + ws | node ≥ 20 |
 | 前端 | PWA（原生 JS；三个 `<audio>`：两路音乐交叉淡入 + 一路口播；WebAudio `GainNode` 控音量/频谱；WS） | 不引重框架。包络按真实时间走，窗口隐藏也不停 |
@@ -67,7 +76,8 @@ TTS 把稿子合成人声，网页播放器一边放歌一边念词，并能按�
 ```
 claudio/
 ├─ CLAUDE.md / AGENTS.md     # 本文件 · 项目总文档（两份内容相同，改一份要同步另一份）
-├─ README.md                 # quickstart
+├─ README.md                 # 四条入口 + quickstart
+├─ CONTRIBUTING.md           # PR 流程、分工、安全红线、用 AI 写码
 ├─ package.json
 ├─ .env.example              # 配置样例（真实 .env 不入库）
 ├─ .gitignore
@@ -75,6 +85,8 @@ claudio/
 │  ├─ references.md          # 参考资料：原版 + 复刻 + 依赖
 │  ├─ progress.md            # 开发进度（实时更新）
 │  ├─ architecture.md        # 四层架构详解
+│  ├─ 上手指南.md            # 本地跑起来、代码地图、加按钮的例子、手机调试、常见坑
+│  ├─ 自部署.md              # 自己部署个人版 / 公用版
 │  └─ hub-api.md             # 公用版需要的 hub 接口契约（hub 不在本仓库）
 ├─ server/
 │  ├─ index.js               # Express + WS 入口（:8080）· finalizeEpisode 组队列 · /proxy 音频代理
@@ -95,8 +107,8 @@ claudio/
 │  ├─ bans.js                # 可撤销的禁播清单
 │  ├─ song-meta.js           # 年份和曲风；接口没有就不编
 │  ├─ voice.js               # 短语音转写后走现有暂停 / 换歌 / 点歌
-│  ├─ ncm.js                 # 网易云：search → song_url → lyric；拿不到回落备用音源；guest* 给公用版借主实例的网易云（只搜、只取链接）
-│  ├─ sources.js             # 备用音源层：按目录加载插件（SOURCE_PLUGIN_DIR，默认数据目录下 plugins/）、每源单独排队、认歌、核对整曲和音质
+│  ├─ ncm.js                 # 网易云：search → song_url → lyric；拿不到时问音源插件；guest* 给公用版借主实例的网易云（只搜、只取链接）
+│  ├─ sources.js             # 音源插件层：按目录加载插件（SOURCE_PLUGIN_DIR，默认数据目录下 plugins/）、每源单独排队、认歌、核对整曲和音质
 │  ├─ ncm-shared.js          # 同一台机器上几个实例共用网易云搜索名额：主实例开 127.0.0.1:8099 名额服务，别的实例来要
 │  ├─ tts/
 │  │  ├─ index.js            # synthesize() 工厂 + 缓存（可插拔）
@@ -175,13 +187,13 @@ claudio/
 ## 已知风险（动手前必读）
 
 1. **网易云 song_url 硬约束**：很多歌要登录 cookie 才返回真实直链；VIP / 无版权歌即便登录也是 null。
-   → 2026-11-23 起拿不到时回落备用音源插件（见 `server/sources.js` 文件头）：网易云认出了歌就保留网易云 id / 歌词，只换音频；网易云连歌都没搜到就整首用备用音源的（id 是「字母前缀 + 数字」）。插件在数据目录 `plugins/`（仓库里 `/plugins` 已忽略、导出排除），**插件的接口地址和请求参数只在插件里，别写进仓库任何文件**。备用音源搜索每源单独算（`SOURCE_SEARCH_PER_MIN` 默认 10、间隔 1 秒、别的实例最多用到 10 − 3），不占网易云名额，网易云 405 冷却时照样能搜。
+   → 音源可用插件扩展（接口见 `server/sources.js` 文件头、`docs/上手指南.md`）：网易云拿不到时问插件。仓库里不放任何具体音源的接入代码。
    → 必须有 fallback（换一首 / 试听片段 / 跳转）。
    → 搜得太密会被限流（405「操作频繁」）：`ncm.js` 按接口冷却，诊断记 `rate-limited`，别当成版权。搜索要带登录 cookie（服务器上匿名搜索一律 405）；后台备节目、发现池、垫场的搜索排队：相隔至少 1.5 秒、任意 60 秒内连点歌一起不超过 6 个（`NCM_SEARCH_GAP_MS` / `NCM_SEARCH_PER_MIN`；实测连着约 10 个就 405），点歌不排队。同一出口的几个实例合用这 6 个（`ncm-shared.js`：主实例 `NCM_SHARED_SERVE=127.0.0.1:8099`，别的实例 `NCM_SHARED_URL`；主实例优先、405 冷却互通）。`claudio.log` 每分钟一行 `[ncm-rate]` 记接口 × 来源 × 结果。测试别反复重装 / 重放，每次启动都是一串请求。
 2. **浏览器 autoplay**：首次必须用户手势触发，之后才能自动连播。
 3. **大脑延迟**：一期生成几秒到一两分钟（本地模型超时 150 秒，失败退避重试）→ 后台预备两期；都没备好时先放垫场歌（收藏 + 最近放过），不冷场。慢几乎都慢在预填充：命中前缀缓存时首字约 1 秒；没命中的部分有时只有约 40 字/秒。所以提示词里不变的放前、常变的放后，改顺序前先想缓存。
 4. **Fish 计费**：按字符，口播稿控制长度。
-5. **版权**：网易云抓直链播放属灰色地带。个人版仅供自用。公用版仅邀请制、需运营者审批；绑定了的人用自己的网易云账号放歌；没绑定的可经主实例借运营者的网易云取链接（只搜、只取链接，不红心、不上报播放、不进主实例记忆，cookie 不出主实例；公用版设 `PUBLIC_BORROW_OWNER=0` 关掉），谁都放不了时回落备用音源。版权与平台协议风险由部署的运营者承担，出问题要能一键停用。
+5. **版权**：网易云抓直链播放属灰色地带。个人版仅供自用。公用版仅邀请制、需运营者审批；绑定了的人用自己的网易云账号放歌；没绑定的可经主实例借运营者的网易云取链接（只搜、只取链接，不红心、不上报播放、不进主实例记忆，cookie 不出主实例；公用版设 `PUBLIC_BORROW_OWNER=0` 关掉），谁都放不了时问音源插件（有的话）。版权与平台协议风险由部署的运营者承担，出问题要能一键停用。
 6. **本地推理依赖自己的机器**：大脑选本地服务时，服务或内网不通会明确报错，不会自动切到云端。语音默认走自建 GPU 机：WSL 节点在外只能走中继（几 KB/s、时断），所以经 Windows 节点开隧道、经跳板调 gpuctl（主机名在 `.env`）；GPU 被别的任务登记占用时明确报错，不抢卡。2026-11-01 起语音档开了 `--compile`：合成比实时快（RTF 约 0.64），3 句口播约 3 秒开口；代价是冷启动约 2 分钟、编译缓存被清后约 3 分钟，Claudio 拉起和首包都等到 240 秒。
 7. **音箱**：不接 RAAT，也不装 pyatv。已经出现在本机输出列表里的 AirPlay 只送 Claudio（`exclusive-play.js`，不改系统默认输出）。还没接上的音箱走控制中心，会把整台 Mac 的声音一起带过去。禁播可单条撤销；自动推荐只看禁播清单。说话按钮只转写，再走现有播放指令。单独出声时一次只能放一路：没有交叉淡入，口播和歌先后放。单独出声还没在真音箱上试过。这些只在服务跑在 Mac 上时可用；Linux 服务器上设备菜单关着。
 8. **语音不在只放歌**：5090 离线、被占或合成失败时这期跳过口播，不自动换 Fish（维护者定）。后台每分钟探测一次并重连隧道，5090 回来后 DJ 自己恢复；探测不调 gpuctl、不 `--force`。gpuctl 拒绝后冷却：被占 10 分钟、连不上 45 秒，期间口播直接跳过（点歌的回复当场带「口播跳过」，网页立刻起歌），不再每段干等约 60 秒；设置页「试听」可绕过一次。
@@ -256,9 +268,9 @@ MVP 4 条 → 全功能 6 条：
 | POST | `/cooldown` | `{"ms":N}` | `{"ok":true}`。别的实例碰到 405 报过来，主实例跟着冷却 N 毫秒（最长 30 分钟） |
 | POST | `/tts` | `{"text":"≤25 字"}` | 主实例语音是 5090、通道 ready、没在合成 / 排队 / 拉起 / 探测、隧道开着时，低优先级念一句（超时 8 秒），回 `audio/mpeg`；否则 409 `{"skip":true}`。不开隧道、不调 gpuctl。主实例点歌碰上时最多等这一句念完 |
 | POST | `/guest/search` | `{"keywords","limit"}` | 公用版没绑定的人借主实例的网易云搜：按别的实例算名额（主实例优先，最多 6 − reserve），等不到 503 `{"busy":true}` |
-| POST | `/guest/song-url` | `{"id","level","title?","artist?","duration?"}` | 网易云 id 用主实例的登录态取直链；放不了且给了歌名就找备用音源；备用 id 直接问插件。每分钟最多 40 次 |
-| POST | `/guest/find` | `{"ncmId?","title","artist","duration?","level"}` | 只找备用音源（绑定的人自己放不了时用） |
-| POST | `/guest/lyric` | `{"id"}` | 备用音源的歌词 |
+| POST | `/guest/song-url` | `{"id","level","title?","artist?","duration?"}` | 网易云 id 用主实例的登录态取直链；放不了且给了歌名就问音源插件；插件的 id 直接问插件。每分钟最多 40 次 |
+| POST | `/guest/find` | `{"ncmId?","title","artist","duration?","level"}` | 只问音源插件（绑定的人自己放不了时用） |
+| POST | `/guest/lyric` | `{"id"}` | 插件歌曲的歌词 |
 
 `/guest/*` 只回歌的信息和直链，不回 cookie；只调网易云 search / song_url，不调 resolve（不记年份曲风），不碰播放记录、收藏、记忆、音频缓存。公用版 `PUBLIC_BORROW_OWNER=0` 关掉借用。
 
