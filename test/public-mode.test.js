@@ -211,7 +211,7 @@ async function startApp(overrides = {}) {
     ...overrides.ncm,
   };
   const brainAsks = [];
-  const brain = {
+  const brain = overrides.brain ? { gate: { full: false }, ask: async (input) => { brainAsks.push(input); return overrides.brain(input); } } : {
     gate: { full: false },
     ask: async (input) => { brainAsks.push(input); return { say: '来了', intent: 'recommend', play: [{ title: '歌一', artist: 'A' }, { title: '歌二', artist: 'B' }], memoryCandidates: input.text.includes('粤语') ? ['喜欢粤语'] : [] }; },
   };
@@ -257,13 +257,27 @@ test('app：没设备 401；链接进门；链接只能用一次；无效链接�
   } finally { t.close(); }
 });
 
-test('app：网页先问 /api/mode，公用版只开配额、最近听过、账号（没设备也能问）', async () => {
+test('app：网页先问 /api/mode，公用版只开配额、最近听过、账号、驾驶模式（没设备也能问）', async () => {
   const t = await startApp();
   try {
     const mode = await t.req('/api/mode');
     assert.equal(mode.status, 200);
     assert.equal(mode.data.mode, 'public');
-    assert.deepEqual(Object.keys(mode.data.features).sort(), ['account', 'history', 'quota']);
+    assert.deepEqual(Object.keys(mode.data.features).sort(), ['account', 'drive', 'history', 'quota']);
+    assert.equal(typeof mode.data.version, 'string');
+    assert.ok(mode.data.version.length > 0);
+  } finally { t.close(); }
+});
+
+test('app：门口第一次打开——没 cookie 回 no_device，旧设备 cookie 失效回 invalid（网页两种都不报错）', async () => {
+  const t = await startApp();
+  try {
+    const none = await t.req('/api/me');
+    assert.equal(none.status, 401);
+    assert.equal(none.data.error, 'no_device');
+    const stale = await t.req('/api/me', { cookie: 'dj_dev=dev-token-gone' });
+    assert.equal(stale.status, 401);
+    assert.equal(stale.data.error, 'invalid'); // web/public.js 的 load()：401 里只有 disabled / expired 才说
   } finally { t.close(); }
 });
 
@@ -826,5 +840,25 @@ test('app：有默认音源时没绑定也能点歌；备用音源的歌能放�
     assert.equal(back.data.id, 'fk3');
     assert.equal((await t.req('/api/song/..%2Fx', { cookie })).status, 400);
     assert.equal((await t.req('/api/lyric?id=FK3', { cookie })).status, 400);
+  } finally { t.close(); }
+});
+
+test('app：驾驶模式点歌告诉大脑只说一句，DJ 回话截成一句；歌带实际音质', async () => {
+  const t = await startApp({
+    brain: () => ({ say: '好嘞，给你来两首提神的。路上注意安全，前面有个弯。', intent: 'recommend', play: [{ title: '歌一', artist: 'A' }], memoryCandidates: [] }),
+  });
+  try {
+    t.ncmResolve.fn = async (c) => ({ id: 7, title: c.title, artist: c.artist, url: 'https://m.music.126.net/7.flac', playable: true,
+      level: 'lossless', bitrate: 1411000, quality: { format: 'flac', bitrate: 1411000, sampleRate: 96000, bits: 24 } });
+    t.hub.addMember('mem_00000001');
+    const cookie = await t.join('mem_00000001');
+    t.members.setCookie('mem_00000001', 'MUSIC_U=a');
+    const plain = await t.req('/api/chat', { method: 'POST', body: { text: '来点提神的' }, cookie });
+    assert.equal(plain.data.say, '好嘞，给你来两首提神的。路上注意安全，前面有个弯。');
+    assert.equal(t.brainAsks.at(-1).drive, false);
+    const driving = await t.req('/api/chat', { method: 'POST', body: { text: '来点提神的', drive: true }, cookie });
+    assert.equal(driving.data.say, '好嘞，给你来两首提神的。');
+    assert.equal(t.brainAsks.at(-1).drive, true);
+    assert.deepEqual(driving.data.songs[0].quality, { format: 'flac', bitrate: 1411000, sampleRate: 96000, bits: 24 });
   } finally { t.close(); }
 });

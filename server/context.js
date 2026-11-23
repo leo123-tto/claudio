@@ -26,6 +26,7 @@ import { isFillerEvent, signalWeight } from './profile.js';
 import { banStore } from './bans.js';
 import { factStore } from './song-meta.js';
 import { currentScene, sceneText } from './scene.js';
+import { DRIVE_PROMPT } from './drive.js';
 
 function readSafe(file) {
   try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; }
@@ -160,7 +161,7 @@ function profileText(profile) {
   ].filter(Boolean).join('\n') || '（行为画像刚开始积累，先参考口味档案）';
 }
 
-export function buildPromptBundle({ userInput = '', mood = '', sleep = null, nowPlaying = null, briefSay = false, excludeSongs = [], recentSays = [], now = new Date(), scene = currentScene(now) } = {}) {
+export function buildPromptBundle({ userInput = '', mood = '', sleep = null, nowPlaying = null, briefSay = false, drive = false, excludeSongs = [], recentSays = [], now = new Date(), scene = currentScene(now) } = {}) {
   const settings = getSettings();
   const favoriteSongs = readFavorites();
   const actualRecent = recentListenedSongs(50);
@@ -276,6 +277,7 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
     userInput && hasPositiveStyle ? styleRules : '',
     chat ? '本次是听众当面说话，要快：say 用 1–2 句、40 到 70 字；reason 15 字内；memoryCandidates 只在听众这次明确说了喜好时写，否则 []。' : '',
     briefSay ? '本次简短口播：推荐或聊天只说一句，30到45个字，不要第二句；控制确认仍在20字内。' : '',
+    drive ? DRIVE_PROMPT : '',
     sleep?.remainingMin != null ? `## 睡前模式\n约 ${sleep.remainingMin} 分钟后睡，歌曲能量逐步下降；剩 5 分钟内温柔收尾。` : '',
     '## 此刻场景（选歌和口播长度按这个来）\n' + sceneText(scene),
     sceneHistory,

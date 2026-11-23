@@ -17,6 +17,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from './config.js';
+import { flacInfo, firstBytes, makeQuality } from './audio-quality.js';
+
+export { flacInfo };
 
 const PREFIX_RE = /^[a-z]{2,4}$/;
 const ALT_ID_RE = /^([a-z]{2,4})(\d{1,20})$/;
@@ -134,34 +137,6 @@ export function matchHit(hits = [], { title = '', artist = '', duration = 0 } = 
   }) || null;
 }
 
-// FLAC 文件头：fLaC + 4 字节块头 + STREAMINFO（采样率 20 位、声道 3 位、位深 5 位）
-export function flacInfo(buf) {
-  if (!buf || buf.length < 26 || buf.toString('latin1', 0, 4) !== 'fLaC') return null;
-  const s = 8;
-  const sampleRate = (buf[s + 10] << 12) | (buf[s + 11] << 4) | (buf[s + 12] >> 4);
-  const bits = (((buf[s + 12] & 0x01) << 4) | (buf[s + 13] >> 4)) + 1;
-  return { sampleRate, bits };
-}
-
-// 不支持 Range 的服务器会回整个文件：只读到够用就断开。
-async function firstBytes(body, n) {
-  if (!body?.getReader) return null;
-  const reader = body.getReader();
-  const parts = [];
-  let size = 0;
-  try {
-    while (size < n) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      parts.push(Buffer.from(value));
-      size += value.length;
-    }
-  } finally {
-    reader.cancel().catch(() => {});
-  }
-  return Buffer.concat(parts).subarray(0, n);
-}
-
 export function createSourceRegistry({
   plugins = [],
   fetchFn = (...args) => globalThis.fetch(...args),
@@ -232,7 +207,14 @@ export function createSourceRegistry({
       } else {
         label = bps >= 250_000 ? 'exhigh' : bps >= 160_000 ? 'higher' : 'standard';
       }
-      return { url, level: label, bitrate: bps, size: info.total, source: plugin.name };
+      // 页面标的音质：格式按文件头 / 插件给的；MP3 码率用插件给的标称值（没有才用文件大小估），采样率位深只从 FLAC 头读
+      const measured = makeQuality({
+        format: info.flac ? 'flac' : format,
+        bitrate: info.flac ? bps : (Number(got.bitrate) || 0) * 1000 || bps,
+        sampleRate: info.flac?.sampleRate,
+        bits: info.flac?.bits,
+      });
+      return { url, level: label, bitrate: bps, size: info.total, source: plugin.name, ...(measured ? { quality: measured } : {}) };
     }
     return null;
   }

@@ -81,6 +81,8 @@ import { controlHeadless, forgetHeadless, headlessStatus, playDefaultFile, playI
 import { looksLikeRoomCommand, matchRoomCommand } from './rooms.js';
 import { roomStore } from './room-store.js';
 import { decodeVoiceAudio, transcribeAudio } from './voice.js';
+import { createDriveState, oneSentence } from './drive.js';
+import { appVersion } from './version.js';
 
 export const services = { plan: llmPlan, stream: callLlmStream, ncm, synthesize, prepareLiveTts,
   listOutputs, selectOutput, openBluetoothSettings, playExclusive, stopExclusive,
@@ -186,6 +188,7 @@ function updatePins() {
   services.cache.pin([...ids, ...(filler?.pins() || [])]);
 }
 
+const driveState = createDriveState();
 const episodeBuffer = createEpisodeBuffer({
   capacity: config.episodeBuffer,
   enabled: () => process.env.CLAUDIO_SKIP_PREFETCH !== '1',
@@ -384,8 +387,10 @@ export async function finalizeEpisode(result, {
       final: songs.map(name),
     }));
   }
-  const say = emptyRecommendation ? '这会儿没找到能放的，先接着听这首。'
+  const fullSay = emptyRecommendation ? '这会儿没找到能放的，先接着听这首。'
     : result.intent === 'recommend' ? correctSay(result.say, result.play || [], songs) : result.say;
+  // 驾驶模式：提示词已经要求一句话，这里再兜一次底
+  const say = driveState.on() ? oneSentence(fullSay) : fullSay;
   const ep = {
     id: randomUUID(), epoch, sayWrittenAt: Date.now(), say, intent: result.intent,
     action: result.action, actionValue: result.actionValue, reason: result.reason,
@@ -395,7 +400,8 @@ export async function finalizeEpisode(result, {
         remoteUrl: song.url, discoveryType: song.candidate.discoveryType || 'adjacent',
         bridgeFrom: song.candidate.bridgeFrom || '',
         ...(song.lane ? { lane: song.lane } : {}), ...(song.year ? { year: song.year } : {}),
-        ...(song.genre ? { genre: song.genre } : {}), ...(song.cover ? { cover: song.cover } : {}) } })),
+        ...(song.genre ? { genre: song.genre } : {}), ...(song.cover ? { cover: song.cover } : {}),
+        ...(song.quality ? { quality: song.quality } : {}) } })),
   };
   historyDetails.set(ep, recommendation);
   for (const item of ep.queue) {
@@ -414,7 +420,7 @@ async function buildEpisode({ userInput = '', mood = '', sleep = null, nowPlayin
   briefSay = false, resolveLimit = 0, resolveTimeout, signal, epoch = episodeBuffer.snapshot().epoch,
   excludeSongs = episodeBuffer.exclusions(), recentSays = episodeBuffer.held().map((ep) => ep.say),
 } = {}) {
-  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, briefSay, excludeSongs, recentSays });
+  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, briefSay, excludeSongs, recentSays, drive: driveState.on() });
   const result = await services.plan(bundle.prompt, { signal });
   signal?.throwIfAborted();
   return finalizeEpisode(result, { recommendation: bundle.recommendation, resolveLimit, resolveTimeout, signal, epoch, nowPlaying });
@@ -1163,7 +1169,8 @@ app.post('/api/outputs', async (req, res) => {
 // 网页（web/，两版同一份）先问这个，决定露出哪些控件、加载哪个播放引擎（web/boot.js）
 app.get('/api/mode', (_req, res) => res.json({
   mode: 'personal',
-  features: { settings: true, dislike: true, prev: true, stop: true, outputs: true, sleep: true, voice: true, meter: true, webFonts: true },
+  features: { settings: true, dislike: true, prev: true, stop: true, outputs: true, sleep: true, voice: true, meter: true, webFonts: true, drive: true, driveSync: true },
+  version: appVersion(),
 }));
 app.get('/api/status', (_req, res) => res.json({
   ok: true, nextReady: Boolean(episodeBuffer.snapshot().buffered), buffered: episodeBuffer.snapshot().buffered, epoch: episodeBuffer.snapshot().epoch, generating: episodeBuffer.snapshot().generating, weather: getWeather(),
@@ -1217,6 +1224,13 @@ app.get('/api/next', async (req, res) => {
   }
 });
 app.post('/api/sleep', (_req, res) => { episodeBuffer.idle(); res.json({ ok: true }); });
+// 驾驶模式开关（网页开着时每隔一会儿再报一次）
+// 开驾驶模式时备好的节目不作废（作废了按「下一首」要等现场重新生成），只把口播改成一句、重新合成；
+// 之后新备的节目按驾驶模式写。关掉时已改短的就短着放，后面的照常。
+app.post('/api/drive', (req, res) => {
+  if (driveState.set(req.body?.on === true) && driveState.on()) episodeBuffer.reviseSays(oneSentence);
+  res.json({ ok: true, on: driveState.on() });
+});
 app.post('/api/episode/release', (req, res) => res.json({ ok: true, released: episodeBuffer.release(String(req.body?.claimId || '')) }));
 app.post('/api/episode/started', (req, res) => {
   try {

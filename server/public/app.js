@@ -9,6 +9,8 @@ import { HubError } from './hub-client.js';
 import { createMediaProxy } from './media.js';
 import { createMixer, shuffle, songKey } from './mix.js';
 import { createVoice, introLine } from './voice.js';
+import { oneSentence } from '../drive.js';
+import { appVersion } from '../version.js';
 
 const COOKIE = 'dj_dev';
 
@@ -35,6 +37,7 @@ export function songView(song) {
   return {
     id: song.id, title: song.title, artist: song.artist, url: `/media/${song.id}`, duration: song.duration || 0,
     level: song.level || '', bitrate: song.bitrate || 0, gain: song.gain ?? null, cover: song.cover || '',
+    ...(song.quality ? { quality: song.quality } : {}),
   };
 }
 const COOKIE_MAX_AGE = 400 * 24 * 3600; // 浏览器允许的上限
@@ -250,7 +253,7 @@ export function createPublicApp({
 
   // 菜单里看设备数要准：先丢掉这台的核验缓存再核一次
   // 网页（web/，和个人版同一份）先问这个：公用版只露出配额、最近听过、账号这几样，播放引擎用 public.js
-  app.get('/api/mode', (req, res) => res.json({ mode: 'public', features: { quota: true, history: true, account: true } }));
+  app.get('/api/mode', (req, res) => res.json({ mode: 'public', features: { quota: true, history: true, account: true, drive: true }, version: appVersion() }));
 
   app.get('/api/me', (req, res, next) => {
     const token = parseCookies(req.headers.cookie)[COOKIE];
@@ -372,6 +375,7 @@ export function createPublicApp({
     const m = req.member;
     const text = String(req.body?.text || '').trim().slice(0, 200);
     const auto = !text;
+    const drive = req.body?.drive === true; // 驾驶模式：DJ 只说一句
     const cookie = members.getCookie(m.id);
     // 盒子出口匿名搜索一律 405，会连累主实例：没有默认音源（没配 NCM_SHARED_URL）时，没绑定的不开放点歌，也不扣次数
     if (!auto && !cookie && !ncm.borrowsOwner) {
@@ -397,7 +401,7 @@ export function createPublicApp({
       let reply;
       let degraded = false;
       try {
-        reply = await brain.ask({ text, auto, memory, bound: true, hour: new Date(now() + 8 * 3600_000).getUTCHours() });
+        reply = await brain.ask({ text, auto, memory, bound: true, drive, hour: new Date(now() + 8 * 3600_000).getUTCHours() });
       } catch (error) {
         if (error?.queueFull) throw error;
         degraded = true;
@@ -408,7 +412,8 @@ export function createPublicApp({
       if (reply.intent === 'recommend') picked = await pickSongs(reply.play, { cookie, memberId: m.id, bound: true, level: qualityFor(memory, cookie) });
       // 推荐了但一首都放不了，就别让 DJ 说「来了」，只给提示
       const nothing = reply.intent === 'recommend' && !picked.songs.length;
-      const say = nothing ? '' : (degraded ? 'DJ 这会儿有点忙，先按你说的直接找了两首。' : reply.say);
+      const fullSay = nothing ? '' : (degraded ? 'DJ 这会儿有点忙，先按你说的直接找了两首。' : reply.say);
+      const say = drive ? oneSentence(fullSay) : fullSay;
       const turns = [...(memory.turns || []), { role: 'user', text }];
       if (say) turns.push({ role: 'dj', text: say });
       const prefs = [...(memory.prefs || [])];

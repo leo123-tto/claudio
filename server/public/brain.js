@@ -3,6 +3,7 @@
 // 老板优先：盒子推理引擎不分调用方，所以由公用版自己让路——
 //   1. 整个公用实例同一时间只跑 1 个大模型请求，排队超过上限直接说「人多」；
 //   2. 发之前看一眼引擎 /metrics，有人在排队或已占满阈值就等，等不到就降级（不叫大模型，按听众原话直接搜歌）。
+import { DRIVE_PROMPT } from '../drive.js';
 import fs from 'node:fs';
 import { callLocalRaw, buildLocalBody } from '../llm/local.js';
 import { extractJson } from '../llm/normalize.js';
@@ -45,7 +46,7 @@ export function parseEngineLoad(text) {
   return { running: pick('running'), waiting: pick('waiting') };
 }
 
-export function buildPrompt({ persona, text, auto, memory, bound, hour }) {
+export function buildPrompt({ persona, text, auto, memory, bound, hour, drive = false }) {
   const lines = [persona.trim(), '', '## 此刻', `北京时间 ${hour} 点。`];
   const taste = memory.taste;
   if (taste?.likes?.length) {
@@ -60,6 +61,7 @@ export function buildPrompt({ persona, text, auto, memory, bound, hour }) {
   if (memory.turns?.length) {
     lines.push('', '## 最近对话', memory.turns.map((t) => `${t.role === 'user' ? '听众' : 'DJ'}：${t.text}`).join('\n'));
   }
+  if (drive) lines.push('', DRIVE_PROMPT);
   lines.push('', '## 听众刚说', auto ? '（没说话，上一段放完了，接着放两首）' : String(text).slice(0, 200));
   return lines.join('\n');
 }

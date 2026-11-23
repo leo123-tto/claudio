@@ -237,3 +237,14 @@ test('相隔数秒的固定状态提示词共享至听众历史，自动转聊�
     assert.notEqual(section(first, '环境'), section(second, '环境'));
   }
 });
+
+test('驾驶模式：提示词尾部加一句「只说一句」，放在任务规则后面（不插进稳定段落）', () => {
+  const now = new Date('2026-11-23T09:00:00+08:00');
+  const plain = buildPromptBundle({ now }).prompt;
+  const driving = buildPromptBundle({ now, drive: true }).prompt;
+  assert.doesNotMatch(plain, /驾驶模式/);
+  assert.match(driving, /## 驾驶模式\n听众正在开车/);
+  // 放在任务规则之后、易变段落那一截，不插进前面稳定的档案 / 画像
+  assert.ok(driving.indexOf('## 驾驶模式') > driving.indexOf('## 本次最高优先级任务'));
+  assert.ok(driving.indexOf('## 驾驶模式') < driving.indexOf('## 此刻场景'));
+});

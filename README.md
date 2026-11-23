@@ -34,16 +34,20 @@ Claudio 让大模型当你的私人 DJ：它记得你的口味和最近听了什
 - **语音口播**：每期开头像电台主持人一样说两句，压在上一首的尾奏上。
 - **多设备接力**：一台开始响，别的自动停；换设备从刚才那首接着放。
 - **沉浸歌词**：全屏大字歌词，平滑滚动。
+- **驾驶模式**：大按键、口播只说一句、点一下说话点歌，屏幕常亮。
+- **真实音质**：显示这首歌实际拿到的格式和规格（如 FLAC 24bit/96kHz），拿不到就不显示，不虚标。
 - **邀请制公用版**：几个朋友一起用，每人绑定自己的网易云账号。
 - **可自部署**：大脑、语音、音源都可插拔，一台常开的机器就能跑。
 
 ## 截图
 
-| 电脑 | 手机 |
+| 电脑 | 沉浸歌词 |
 |:---:|:---:|
-| <img src="docs/images/desktop.png" alt="电脑上的播放页和对话" /> | <img src="docs/images/phone.png" alt="手机竖屏播放页" width="260" /> |
-| **沉浸歌词** | **公用版申请页** |
-| <img src="docs/images/immersive.png" alt="沉浸歌词" /> | <img src="docs/images/apply.png" alt="公用版申请页" width="260" /> |
+| <img src="docs/images/desktop.png" alt="电脑上的播放页和对话" /> | <img src="docs/images/immersive.png" alt="沉浸歌词" /> |
+
+| 手机 | 驾驶模式 | 公用版申请页 |
+|:---:|:---:|:---:|
+| <img src="docs/images/phone.png" alt="手机竖屏播放页" width="220" /> | <img src="docs/images/drive.png" alt="驾驶模式" width="220" /> | <img src="docs/images/apply.png" alt="公用版申请页" width="220" /> |
 
 <sub>截图用的是测试数据。</sub>
 

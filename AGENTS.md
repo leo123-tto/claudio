@@ -93,6 +93,9 @@ claudio/
 │  ├─ episode-buffer.js      # 后台预备两期节目：领取 → 开声才算数 → 没放就退回；epoch 作废旧节目；没有网页连着或点了停止就不备；备出零首歌的不进缓冲，30 秒起退避重试
 │  ├─ episode-audio.js       # 节目里的歌解析成可播地址（点歌总预算 20 秒、后台 90 秒）；开播前刷新过期直链
 │  ├─ episode-coherence.js   # 口播提到不会播的歌或顺序不对时才改写
+│  ├─ drive.js               # 驾驶模式：口播只说一句（DRIVE_PROMPT + oneSentence）；个人版的开关状态 2 小时自动失效
+│  ├─ audio-quality.js       # 实际音质 {format, bitrate, sampleRate, bits}：网易云 song_url 的 type/br/sr，FLAC 读 64 字节文件头补位深；拿不到的不带
+│  ├─ version.js             # /api/mode 的 version：git 短号 → 部署前写的 server/version.json → package 版本 + 构建时间
 │  ├─ filler.js              # 大脑或语音没好时的垫场歌（收藏 + 最近放过；点了曲风先挑网易云曲风对得上的）
 │  ├─ audio-cache.js         # 本地音频缓存 cache/audio（LRU 400 MB，/media/:id）
 │  ├─ style-request.js       # 明确要求的曲风，备选也必须符合
@@ -136,6 +139,7 @@ claudio/
 ├─ scripts/
 │  ├─ spike-tts.mjs          # TTS 冒烟测试
 │  ├─ gen-favorites.mjs      # 歌单 → user/favorites.md 曲库
+│  ├─ stamp-version.mjs      # 部署前跑：写 server/version.json（git 短号 + 时间，不进仓库），盒子上没有 .git，页面靠它显示版本
 │  └─ ncm-login.mjs          # 网易云扫码登录拿 cookie
 ├─ bin/
 │  └─ claudio-house.mjs      # 无窗口常驻：只起网易云和服务（开机自启自己配）
@@ -152,6 +156,7 @@ claudio/
    ├─ subtitle.js            # 口播字幕按语音时长逐字出
    ├─ handoff.js             # 本机设备号（localStorage）和设备名（Mac Chrome / iPhone Safari…）
    ├─ voice-stream.js        # 口播边收边播：/api/tts/stream 用 MediaSource（iPhone 用 ManagedMediaSource）喂块，打不开就直接放
+   ├─ drive.js               # 驾驶模式（两版共用，只管界面）：大键转给原按钮、说话（个人版走「说话」，公用版浏览器听写→键盘听写）、Wake Lock、记住开关
    ├─ window-mode.js         # 沉浸歌词（顶栏按钮 / F 进，Esc / 轻点空白退）：能网页全屏就全屏，iPhone Safari 等不给就页面内铺满；闲置隐藏控件
    └─ styles.css
 ```
@@ -223,11 +228,12 @@ MVP 4 条 → 全功能 6 条：
 | POST | `/api/episode/started` | `{id, claimId}`：节目真正开声才算数，记播放和推荐 | ✅ |
 | POST | `/api/episode/release` | `{claimId}`：领了没放（换心情、停止、过期）就退回 | ✅ |
 | POST | `/api/sleep` | 睡眠定时到点：后台不再补备节目、停掉备节目的口播合成；下次领取自动恢复 | ✅ |
+| POST | `/api/drive` | `{on}`：网页开 / 关驾驶模式（开着每 20 分钟再报一次，2 小时没报自动失效）。打开时已备好的节目不作废，只把口播改成一句、重新合成（WS `sayRevised`），之后新备的口播只说一句。公用版不走这个，点歌带 `drive:true` | ✅ |
 | GET | `/api/episode/:id/voice` | 这期口播的状态：ready / pending / skipped | ✅ |
 | GET | `/api/filler?exclude=` | 垫场歌一首（收藏 + 最近放过，优先已缓存的） | ✅ |
 | GET | `/api/lyric?id=` | 歌词补取（WS 推丢或点歌后现取时，前端按需来要） | ✅ |
 | GET | `/media/:id` | 本地音频缓存里的歌（LRU 400 MB） | ✅ |
-| WS | `/stream` | `hello`（epoch / buffered）· `nextReady` · `voiceReady` · `episodesInvalidated`（换口味后旧节目作废）· `scheduled`（定时节目，已替前端领取，带 `claimId`）· `sayDraft`（口播稿写完先出文字）· `sayReady` / `sayFailed` · `lyrics` · `ttsLane`（5090 语音档 starting / busy / ready / offline / error）· `handoff`（某台设备开始响，其他设备暂停） | ✅ |
+| WS | `/stream` | `hello`（epoch / buffered）· `nextReady` · `voiceReady` · `episodesInvalidated`（换口味后旧节目作废）· `sayRevised`（开驾驶模式后备好的下一段口播改短了）· `scheduled`（定时节目，已替前端领取，带 `claimId`）· `sayDraft`（口播稿写完先出文字）· `sayReady` / `sayFailed` · `lyrics` · `ttsLane`（5090 语音档 starting / busy / ready / offline / error）· `handoff`（某台设备开始响，其他设备暂停） | ✅ |
 | GET | `/proxy` | 网易云直链同源代理（真频谱 + seek；白名单防 SSRF） | ✅ |
 | POST | `/api/fav` | 收藏当前歌（落库进品味）；`remove:true` 取消收藏 | ✅ |
 | GET | `/api/favorites` | 当前本机口味曲库数量 | ✅ |
@@ -236,7 +242,7 @@ MVP 4 条 → 全功能 6 条：
 | GET | `/api/weather` | 当前天气 | ✅ |
 | GET | `/api/fish-credit` | Fish 余额（key 只在后端） | ✅ |
 | POST | `/api/settings/test-pc5090-tts` | 5090 语音试听（设置页「试听」），冷启动要等约 2 分钟 | ✅ |
-| GET | `/api/mode` | 网页先问这个：`{mode:'personal', features}`，决定露出哪些控件、加载哪个播放引擎（公用版回 `public`） | ✅ |
+| GET | `/api/mode` | 网页先问这个：`{mode:'personal', features, version}`，决定露出哪些控件、加载哪个播放引擎（公用版回 `public`）；`version` 在设置 / 账号面板角落显示 | ✅ |
 | GET | `/api/status` | 健康检查 + 节目缓冲（`buffered` / `epoch` / `generating`）。`tts.model` 在 5090 时是音色名，在 Fish 时是模型名 | ✅ |
 | GET | `/api/outputs` | 播放设备菜单 | ✅ |
 | POST | `/api/outputs` | 切换播放设备 | ✅ |

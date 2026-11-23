@@ -60,6 +60,8 @@ export async function refreshEpisodeUrls(episode, { cache, songUrl, signal, time
         if (!closed && !controller.signal.aborted && fresh?.url) {
           item.url = fresh.url;
           item.meta.remoteUrl = fresh.url;
+          // 换了直链就按新链接标音质；新链接没给就不标，免得留着旧的
+          if (fresh.quality) item.meta.quality = fresh.quality; else delete item.meta.quality;
         }
       } catch { /* 直链刷新失败时保留旧地址，仍可尝试播放。 */ }
     })), deadline]);

@@ -29,3 +29,6 @@ runtime/
 
 # 私有音源插件（server/sources.js 按目录加载；不进仓库、不进公开快照）
 /plugins
+
+# 部署时写的版本戳（scripts/stamp-version.mjs）
+/server/version.json

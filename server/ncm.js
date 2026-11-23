@@ -4,6 +4,7 @@
 // ⚠️ 硬约束：很多歌的 /song/url 需要登录 cookie 才返回真实直链；
 //    VIP / 无版权歌即便登录也可能为 null。resolve() 拿不到时返回 playable:false。
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { ncmQuality, withFlacHeader } from './audio-quality.js';
 import { config } from './config.js';
 import { getSettings } from './settings.js';
 import { factStore, parseSongFacts } from './song-meta.js';
@@ -233,12 +234,17 @@ async function ncmSongUrl(id, level, options) {
   if (!item?.url) return null;
   const peak = Number(item.peak) || 0;
   const gain = Number(item.gain);
+  const trial = Boolean(item.freeTrialInfo);
+  // 页面标的真实音质；试听版不放，不用去读 FLAC 头
+  const quality = trial ? ncmQuality(item)
+    : await withFlacHeader(ncmQuality(item), item.url, { signal: options?.signal, ...(options?.fetchFn ? { fetchFn: options.fetchFn } : {}) });
   return {
     url: item.url,
     level: String(item.level || level),
     bitrate: Number(item.br) || 0,
     gain: peak > 0 && Number.isFinite(gain) && Math.abs(gain) < 30 ? gain : null,
-    trial: Boolean(item.freeTrialInfo),
+    trial,
+    ...(quality ? { quality } : {}),
   };
 }
 
@@ -405,6 +411,7 @@ async function withFacts(hit, audio, asked, options) {
     playable: true,
     level: audio.level,
     bitrate: audio.bitrate,
+    ...(audio.quality ? { quality: audio.quality } : {}),
     requestedLevel: asked,
     ...(audio.source ? { source: audio.source } : {}),
   };
@@ -417,7 +424,7 @@ async function altAudio(hit, level, options) {
   try {
     const found = await sources.find({ title: hit.title, artist: hit.artist, duration: hit.duration, ncmId: hit.id },
       { level, kind: sourceKind(), signal: options.signal });
-    return found && { url: found.url, level: found.level, bitrate: found.bitrate, source: found.source };
+    return found && { url: found.url, level: found.level, bitrate: found.bitrate, source: found.source, ...(found.quality ? { quality: found.quality } : {}) };
   } catch (error) {
     rethrowAbort(error, options.signal);
     return null;

@@ -35,7 +35,7 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
 
   function remember(memberId, level, song) {
     if (!song?.url || !song.id) return;
-    urls.set(key(memberId, song.id, level), { url: song.url, bitrate: song.bitrate || 0, gain: song.gain ?? null, level: song.level || '', until: now() + URL_TTL });
+    urls.set(key(memberId, song.id, level), { url: song.url, bitrate: song.bitrate || 0, gain: song.gain ?? null, level: song.level || '', quality: song.quality || null, until: now() + URL_TTL });
     if (urls.size > 2000) urls.delete(urls.keys().next().value);
   }
 
@@ -45,7 +45,7 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
     if (hit && hit.until > now() && !fresh) return hit;
     const audio = await ncm.songUrl(id, { cookie: members.getCookie(memberId), memberId, level });
     if (!audio || audio.trial) { urls.delete(k); return null; }
-    const entry = { url: audio.url, bitrate: audio.bitrate || 0, gain: audio.gain ?? null, level: audio.level || '', until: now() + URL_TTL };
+    const entry = { url: audio.url, bitrate: audio.bitrate || 0, gain: audio.gain ?? null, level: audio.level || '', quality: audio.quality || null, until: now() + URL_TTL };
     urls.set(k, entry);
     return entry;
   }
@@ -97,7 +97,7 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
   async function meta(memberId, id) {
     const level = qualityFor(members.memory(memberId), members.getCookie(memberId));
     const entry = await lookup(memberId, id, level, false);
-    return entry && { gain: entry.gain, level: entry.level, bitrate: entry.bitrate };
+    return entry && { gain: entry.gain, level: entry.level, bitrate: entry.bitrate, ...(entry.quality ? { quality: entry.quality } : {}) };
   }
 
   return { remember, handle, meta, streams };

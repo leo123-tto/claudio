@@ -152,3 +152,31 @@ export function paintHeart(button, on, { pulse = false } = {}) {
 export function onEnter(input, fn) {
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); fn(); } });
 }
+
+// 实际拿到的音质 → 「FLAC 24bit/96kHz」「MP3 320k」。只用真拿到的字段，缺的不补；什么都没有就回空串。
+const LOSSLESS = new Set(['flac', 'wav', 'ape', 'alac']);
+const kHz = (sr) => `${Number((sr / 1000).toFixed(1))}kHz`;
+export function qualityLabel(q) {
+  if (!q || typeof q !== 'object') return { text: '', detail: '', lossless: false };
+  const format = String(q.format || '').toLowerCase();
+  const name = format.toUpperCase();
+  const lossless = LOSSLESS.has(format);
+  const bits = Number(q.bits) > 0 ? `${q.bits}bit` : '';
+  const rate = Number(q.sampleRate) > 0 ? kHz(q.sampleRate) : '';
+  const kbps = Number(q.bitrate) > 0 ? `${Math.round(q.bitrate / 1000)}k` : '';
+  let spec;
+  if (lossless) spec = [bits, rate].filter(Boolean).join('/') || kbps;
+  else spec = kbps || rate;
+  const text = [name, spec].filter(Boolean).join(' ');
+  const detail = [name, bits && `${q.bits} bit`, rate && `${Number((q.sampleRate / 1000).toFixed(1))} kHz`, kbps && `${Math.round(q.bitrate / 1000)} kbps`]
+    .filter(Boolean).join(' · ');
+  return { text, detail, lossless };
+}
+export function paintQuality(chip, q) {
+  if (!chip) return;
+  const { text, detail, lossless } = qualityLabel(q);
+  chip.textContent = text;
+  chip.title = detail ? `实际音质：${detail}` : '';
+  chip.classList.toggle('hidden', !text);
+  chip.classList.toggle('lossless', lossless);
+}

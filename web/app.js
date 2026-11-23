@@ -7,14 +7,14 @@ import { deviceIdentity } from './handoff.js';
 import { envelopeValue, equalPower, crossfadeDuration, mediaDeadline, waitForPlaying, waitForCanPlay } from './transitions.js';
 import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
 import { typewriter, renderStatic } from './subtitle.js';
-import { createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter } from './ui.js';
+import { createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality } from './ui.js';
 
 // Claudio · 点阵电台播放器
 // 两路音乐与独立口播混音；声音编排不依赖窗口绘制。
 const $ = (id) => document.getElementById(id);
 const el = {};
 [
-  'nowTitle', 'nowMeta', 'nowState',
+  'nowTitle', 'nowMeta', 'nowState', 'nowQuality',
   'prevBtn', 'playBtn', 'nextBtn', 'stopBtn', 'dislikeBtn', 'favBtn', 'vol',
   'curTime', 'durTime', 'bar', 'barFill', 'queueCount',
   'liveTag', 'lanePill', 'laneText', 'connMsg', 'stream', 'nowPlaying', 'moodInput', 'voiceBtn', 'sleepBtn', 'sleepBadge', 'sendBtn', 'connState',
@@ -396,9 +396,10 @@ onSeg(el.themeSeg, applyTheme);
 const covers = createCovers({ imgs: [...document.querySelectorAll('.cover-img')], bdA: el.bdA, bdB: el.bdB });
 const paintThumbs = covers.paintThumbs;
 const setBackdrop = covers.setBackdrop;
-function setNowPlaying(title, { artist = '', facts = '', cover = '' } = {}) {
+function setNowPlaying(title, { artist = '', facts = '', cover = '', quality = null } = {}) {
   el.nowTitle.textContent = title;
   el.nowMeta.textContent = [artist, facts].filter(Boolean).join(' · ');
+  paintQuality(el.nowQuality, quality);
   paintThumbs(cover);
 }
 
@@ -1072,6 +1073,7 @@ function showSong(item, i) {
     artist: item.meta.artist,
     facts: [item.meta.year, item.meta.genre].filter(Boolean).join(' · '),
     cover: item.meta.cover,
+    quality: item.meta.quality,
   });
   setBackdrop(item.meta.cover);
   setState('正在播放');
@@ -2784,6 +2786,14 @@ function handleWS(e) {
   if (msg.kind === 'nextReady' && started && !stopped) {
     el.connMsg.textContent = '下一期已就绪';
     if (!pendingEpisode && (!exclusiveSink?.uid || exclusiveClock.paused)) { clearTimeout(claimPoll); claimPoll = null; gated('claimReady', requestNext); }
+  }
+  // 驾驶模式开关变了：服务端把备好的下一段口播改短、重新合成；这里换掉手上那份的旧口播，等新的或直接放歌
+  if (msg.kind === 'sayRevised' && pendingEpisode?.episode.id === msg.episodeId && !pendingEpisode.started) {
+    const ep = pendingEpisode.episode;
+    ep.say = msg.say;
+    ep.queue = ep.queue.filter((q) => q.type !== 'tts');
+    ep.voice = { status: msg.voice === 'pending' ? 'pending' : 'skipped' };
+    if (ep.voice.status === 'pending') pollPendingVoice(); else clearTimeout(voicePoll);
   }
   if (msg.kind === 'voiceReady' && pendingEpisode?.episode.id === msg.episodeId) {
     applyPreparedVoice(pendingEpisode, { ...msg, status: 'ready' });

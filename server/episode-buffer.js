@@ -173,6 +173,28 @@ export function createEpisodeBuffer({
     ensure();
     return epoch;
   }
+  // 驾驶模式开关变了：备好的节目照常放，只改口播（改短后重新合成；来不及合成时开播会跳过口播）。
+  // 不作废节目，免得一进驾驶模式按「下一首」就得等现场重新生成。正在放的不动。
+  function reviseSays(rewrite) {
+    const pending = [...buffer, ...[...claims.values()].filter((c) => !c.invalid).map((c) => c.episode)];
+    let revised = 0;
+    for (const ep of pending) {
+      if (!ep?.say || ep === current) continue;
+      const say = String(rewrite(ep.say) || '').trim();
+      if (!say || say === ep.say) continue;
+      voiceJobs.get(ep.id)?.abort();
+      voiceJobs.delete(ep.id);
+      ep.say = say;
+      ep.queue = ep.queue.filter((item) => item.type !== 'tts');
+      ep.voice = { status: ep.voice?.status === 'skipped' ? 'skipped' : 'pending' };
+      ep.voiceFailures = 0;
+      revised += 1;
+      emit({ kind: 'sayRevised', episodeId: ep.id, say, voice: ep.voice.status });
+      void voice(ep);
+    }
+    if (revised) notifyChange();
+    return revised;
+  }
   async function claim(claimId) {
     expire();
     if (!claimId) throw new Error('缺少领取编号');
@@ -244,7 +266,7 @@ export function createEpisodeBuffer({
     return { ...ep.voice, ...(item ? { url: item.url, text: ep.say } : {}) };
   }
   return {
-    ensure, idle, claim, release, start, invalidate, runForeground, retryVoices, exclusions, held,
+    ensure, idle, claim, release, start, invalidate, reviseSays, runForeground, retryVoices, exclusions, held,
     adopt(ep, claimId) {
       stamp(ep); episodes.set(ep.id, ep);
       const entry = { at: now(), episode: ep, invalid: false, ready: Promise.resolve() };

@@ -172,7 +172,11 @@ body::before {
   padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px;
   font: 400 9.5px/1.3 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2);
 }
-body.thinking .chip { color: var(--red); border-color: rgba(215, 25, 33, 0.5); animation: blink 1.1s ease-in-out infinite; }
+/* 实际拿到的音质（格式 / 码率 / 采样率 / 位深），无损的亮一点 */
+.chips { display: flex; gap: 6px; max-width: 100%; min-width: 0; }
+.chips .chip { min-width: 0; }
+.chip.quality { text-transform: none; letter-spacing: 0.04em; flex: none; }
+body.thinking .chip:not(.quality) { color: var(--red); border-color: rgba(215, 25, 33, 0.5); animation: blink 1.1s ease-in-out infinite; }
 .now-actions { display: flex; }
 .heart.fav-on { color: var(--red); }
 .heart.fav-on .ico { fill: currentColor; }
@@ -458,6 +462,7 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.25); }
   border-top: 1px solid var(--line);
 }
 .sheet-foot .result { flex: 1; min-width: 0; }
+.version { margin: 8px 0 0; text-align: right; font: 11px/1.4 var(--font-mono); letter-spacing: 0.04em; color: var(--fg-3); user-select: all; }
 
 .ban-list { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--fg-2); }
 .ban-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 32px; color: var(--fg); }
@@ -581,7 +586,7 @@ body.fullscreen .app:has(.line.song.active):not(:has(.lyric-line)) .now {
   grid-area: stage; display: grid; grid-template-columns: minmax(0, 1fr); place-content: center; text-align: center; pointer-events: none;
 }
 body.fullscreen .now-text { align-items: center; }
-body.fullscreen .now .cover-sm, body.fullscreen .now .now-actions, body.fullscreen .now .chip { display: none; }
+body.fullscreen .now .cover-sm, body.fullscreen .now .now-actions, body.fullscreen .now .chips { display: none; }
 body.fullscreen .now-title { font-size: clamp(32px, 7vw, 88px); line-height: 1.2; white-space: normal; }
 body.fullscreen .now-meta { margin-top: 0.6em; font-size: clamp(16px, 2.6vw, 30px); white-space: normal; }
 body.fullscreen .transport {
@@ -655,6 +660,7 @@ body:has(> .gate:not(.hidden)) { overflow: auto; }
 .gate-form .btn-solid, .apply .btn-solid { height: 44px; }
 .gate .result { min-height: 1.5em; max-width: 340px; text-align: center; }
 .gate .link { font-size: 13px; color: var(--fg-2); text-decoration: none; }
+.gate .gate-apply { display: flex; align-items: center; justify-content: center; width: min(340px, 100%); height: 44px; color: var(--fg); font-size: 14px; text-decoration: none; }
 .gate .link:hover { color: var(--fg); }
 
 /* 菜单、最近听过、二维码 */
@@ -680,4 +686,91 @@ body:has(> .gate:not(.hidden)) { overflow: auto; }
 body.mode-public.ios .sub-row { display: none; }
 @media (max-width: 400px) {
   body.mode-public .live-tag { display: none; }
+}
+
+/* ════ 驾驶模式：整屏只剩大按钮和大字（drive.js）════ */
+.drive {
+  position: fixed; inset: 0; z-index: 30; background: var(--bg); color: var(--fg);
+  display: grid; gap: 18px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "top" "info" "keys" "mic";
+  padding: max(16px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+  -webkit-user-select: none; user-select: none; touch-action: manipulation;
+}
+body.drive-on { overflow: hidden; }
+body.drive-on .notice { z-index: 35; bottom: auto; top: calc(70px + env(safe-area-inset-top)); font-size: 15px; }
+.drive-top { grid-area: top; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.drive-exit {
+  display: inline-flex; align-items: center; gap: 8px; height: 48px; padding: 0 18px 0 14px;
+  border: 1px solid var(--line-strong); border-radius: 999px; font-size: 16px; color: var(--fg-2);
+}
+.drive-exit .ico { width: 20px; height: 20px; }
+.drive-quality { font-size: 12px; padding: 5px 10px; }
+.drive-info { grid-area: info; display: flex; flex-direction: column; justify-content: center; gap: 10px; min-height: 0; overflow: hidden; }
+.drive-title {
+  font-size: clamp(30px, 8.6vw, 56px); font-weight: 800; line-height: 1.15; letter-spacing: -0.01em;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere;
+}
+.drive-artist {
+  font-size: clamp(20px, 5.6vw, 32px); font-weight: 600; color: var(--fg-2); line-height: 1.25;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.drive-artist:empty { display: none; }
+.drive-status {
+  min-height: 1.4em; font-size: 17px; line-height: 1.4; color: var(--fg-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.drive-keys { grid-area: keys; display: grid; grid-template-columns: 1fr 1.25fr 1fr; gap: 20px; }
+.drive-key {
+  height: clamp(96px, 15vh, 132px); border-radius: 28px; display: grid; place-items: center;
+  background: var(--fill-2); color: var(--fg); border: 1px solid var(--line);
+  transition: transform 0.12s var(--ease), background 0.12s;
+}
+.drive-key:active { transform: scale(0.95); background: var(--line-strong); }
+.drive-key .ico { width: 44px; height: 44px; }
+.drive-key.play { background: var(--fg); color: var(--bg); border-color: transparent; }
+.drive-key.play .ico { width: 52px; height: 52px; }
+.drive-key.play .ico-play { transform: translateX(3px); }
+body.playing .drive-key.play .ico-play { display: none; }
+body.playing .drive-key.play .ico-pause { display: block; }
+.drive-key.heart.fav-on { color: var(--red); }
+.drive-key.heart.fav-on .ico { fill: currentColor; }
+.drive-mic {
+  grid-area: mic; height: clamp(88px, 13vh, 116px); border-radius: 28px;
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  border: 2px solid var(--line-strong); font-size: 22px; font-weight: 700; color: var(--fg);
+  transition: transform 0.12s var(--ease), background 0.12s, border-color 0.12s;
+}
+.drive-mic .ico { width: 34px; height: 34px; }
+.drive-mic:active { transform: scale(0.97); }
+.drive-mic.on { background: var(--red); border-color: var(--red); color: #fff; animation: blink 1.4s ease-in-out infinite; }
+.drive-type {
+  grid-area: mic; display: flex; gap: 12px; align-items: stretch; z-index: 1;
+  background: var(--bg);
+}
+.drive-type input {
+  flex: 1; min-width: 0; height: clamp(64px, 10vh, 88px); padding: 0 18px; border-radius: 22px;
+  border: 2px solid var(--line-strong); background: var(--fill); color: var(--fg); font-size: 20px;
+}
+.drive-send { flex: none; padding: 0 24px; border-radius: 22px; background: var(--fg); color: var(--bg); font-size: 18px; font-weight: 700; }
+
+/* 横屏手机：左边大字，右边按钮 */
+@media (orientation: landscape) and (max-height: 560px) {
+  .drive {
+    gap: 14px 22px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "top keys" "info keys" "info mic";
+  }
+  .drive-keys { align-self: stretch; }
+  .drive-key { height: auto; min-height: 96px; }
+  .drive-mic { height: auto; min-height: 76px; }
+  .drive-title { font-size: clamp(26px, 5.4vw, 44px); }
+  .drive-artist { font-size: clamp(18px, 3.6vw, 26px); }
+}
+/* 大屏：收在中间，不铺满 */
+@media (min-width: 900px) and (min-height: 600px) {
+  .drive { padding-left: max(18px, calc(50vw - 380px)); padding-right: max(18px, calc(50vw - 380px)); }
+  .drive-title { font-size: 56px; }
 }

@@ -12,7 +12,7 @@
     <meta name="apple-mobile-web-app-title" content="Claudio" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <script src="/theme.js"></script>
-    <link rel="stylesheet" href="/styles.css?v=15" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
   </head>
   <body>
     <svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
@@ -35,6 +35,7 @@
         <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
         <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
         <symbol id="i-history" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.2 4.8v3.4h3.4"/><path d="M12 8.2V12l2.6 1.8"/></symbol>
+        <symbol id="i-car" viewBox="0 0 24 24"><path d="M5 16.5v2M19 16.5v2M4 12.5l1.8-5A2 2 0 0 1 7.7 6h8.6a2 2 0 0 1 1.9 1.5l1.8 5"/><rect x="3.5" y="12.5" width="17" height="4.5" rx="1.6"/><circle cx="7.5" cy="14.7" r="0.9" fill="currentColor" stroke="none"/><circle cx="16.5" cy="14.7" r="0.9" fill="currentColor" stroke="none"/></symbol>
         <symbol id="i-qr" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2.5v2.5H14zM17.5 17.5H20V20h-2.5zM14 20h2"/></symbol>
       </defs>
     </svg>
@@ -55,7 +56,7 @@
       </form>
       <p class="result" id="gateMsg"></p>
       <button class="btn-line hidden" id="wechatGo" type="button">就在微信里听</button>
-      <a class="link" href="/apply">申请邀请</a>
+      <a class="btn-line gate-apply" href="/apply">申请邀请</a>
     </main>
 
     <div class="app hidden" id="app">
@@ -69,6 +70,7 @@
           <span class="quota hidden" id="quotaTag" data-cap="quota"></span>
           <button class="icon-btn hidden" id="historyBtn" data-cap="history" type="button" aria-label="最近听过" title="最近听过"><svg class="ico"><use href="#i-history"/></svg></button>
           <button class="icon-btn hidden" id="settingsBtn" data-cap="settings" type="button" aria-label="设置" title="设置"><svg class="ico"><use href="#i-gear"/></svg></button>
+          <button class="icon-btn hidden" id="driveBtn" data-cap="drive" type="button" aria-label="驾驶模式" title="驾驶模式"><svg class="ico"><use href="#i-car"/></svg></button>
           <button class="icon-btn" id="fullscreenBtn" type="button" aria-label="沉浸歌词" title="沉浸歌词（F）"><svg class="ico"><use href="#i-fullscreen"/></svg></button>
           <button class="icon-btn hidden" id="accountBtn" data-cap="account" type="button" aria-label="账号与设备" title="账号与设备"><svg class="ico"><use href="#i-more"/></svg></button>
         </div>
@@ -82,7 +84,10 @@
           <div class="now-text">
             <div class="now-title" id="nowTitle">—</div>
             <div class="now-meta" id="nowMeta"></div>
-            <div class="chip" id="nowState">READY</div>
+            <div class="chips">
+              <div class="chip" id="nowState">READY</div>
+              <div class="chip quality hidden" id="nowQuality"></div>
+            </div>
           </div>
           <div class="now-actions">
             <button class="icon-btn heart" id="favBtn" type="button" aria-label="收藏" title="收藏这首"><svg class="ico"><use href="#i-heart"/></svg></button>
@@ -140,6 +145,32 @@
         <button class="icon-btn mic hidden" id="voiceBtn" data-cap="voice" type="button" aria-label="语音输入" title="按一下说话，再按一下送出"><svg class="ico"><use href="#i-mic"/></svg></button>
         <button class="btn-send" id="sendBtn" type="button" aria-label="发送" title="发送"><svg class="ico"><use href="#i-send"/></svg></button>
       </div>
+
+      <!-- 驾驶模式：只剩大按钮和大字（drive.js；按钮转给上面那几个，播放逻辑不变） -->
+      <section class="drive hidden" id="drive" aria-label="驾驶模式">
+        <div class="drive-top">
+          <button class="drive-exit" id="driveExit" type="button"><svg class="ico"><use href="#i-close"/></svg><span>退出驾驶</span></button>
+          <span class="drive-quality chip quality hidden" id="driveQuality"></span>
+        </div>
+        <div class="drive-info">
+          <div class="drive-title" id="driveTitle"></div>
+          <div class="drive-artist" id="driveArtist"></div>
+          <div class="drive-status" id="driveStatus" role="status"></div>
+        </div>
+        <div class="drive-keys">
+          <button class="drive-key heart" id="driveFav" type="button" aria-label="收藏" aria-pressed="false"><svg class="ico"><use href="#i-heart"/></svg></button>
+          <button class="drive-key play" id="drivePlay" type="button" aria-label="播放/暂停">
+            <svg class="ico ico-play"><use href="#i-play"/></svg>
+            <svg class="ico ico-pause"><use href="#i-pause"/></svg>
+          </button>
+          <button class="drive-key" id="driveNext" type="button" aria-label="下一首"><svg class="ico"><use href="#i-next"/></svg></button>
+        </div>
+        <button class="drive-mic" id="driveMic" type="button" aria-pressed="false"><svg class="ico"><use href="#i-mic"/></svg><span id="driveMicText">点一下说话</span></button>
+        <form class="drive-type hidden" id="driveType" autocomplete="off">
+          <input id="driveInput" type="text" maxlength="200" enterkeyhint="send" placeholder="点键盘上的麦克风说" aria-label="想听什么" />
+          <button class="drive-send" type="submit">发送</button>
+        </form>
+      </section>
 
       <div class="sr-only">
         <span id="connMsg">Connecting to Claudio server…</span>
@@ -242,6 +273,7 @@
               <button type="button" role="radio" data-value="light" aria-checked="false">LIGHT</button>
             </div>
           </section>
+          <p class="version hidden" data-version></p>
         </div>
 
         <footer class="sheet-foot">
@@ -272,6 +304,7 @@
           <section class="group">
             <div class="row"><span></span><button class="btn-line danger" id="logoutBtn" type="button">退出这台设备</button></div>
           </section>
+          <p class="version hidden" data-version></p>
         </div>
       </section>
     </div>
@@ -296,6 +329,6 @@
       </section>
     </div>
 
-    <script src="/boot.js?v=2" type="module"></script>
+    <script src="/boot.js?v=4" type="module"></script>
   </body>
 </html>

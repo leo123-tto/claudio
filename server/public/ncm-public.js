@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { rankHits, VERSION_RE } from '../ncm.js';
 import { createTimeoutSignal } from '../llm/openai-chat.js';
 import { requestSlot, reportCooldown } from '../ncm-shared.js';
+import { makeQuality as cleanQuality, ncmQuality, withFlacHeader } from '../audio-quality.js';
 
 export class NcmBusyError extends Error {
   constructor(message = '排队中，稍后再试') {
@@ -245,12 +246,17 @@ export function createNcmClient({
       if (!item?.url) continue;
       const peak = Number(item.peak) || 0;
       const gain = Number(item.gain);
+      const trial = Boolean(item.freeTrialInfo);
+      const url = toHttps(item.url);
+      // 页面标的真实音质（FLAC 读一次文件头补位深）；试听版不读
+      const quality = trial ? ncmQuality(item) : await withFlacHeader(ncmQuality(item), url, { fetchFn, signal: options.signal });
       return {
-        url: toHttps(item.url),
+        url,
         level: String(item.level || ''),
         bitrate: Number(item.br) || 0,
         gain: peak > 0 && Number.isFinite(gain) && Math.abs(gain) < 30 ? gain : null,
-        trial: Boolean(item.freeTrialInfo),
+        trial,
+        ...(quality ? { quality } : {}),
       };
     }
     return null;
@@ -259,6 +265,7 @@ export function createNcmClient({
   const altView = (audio) => audio?.url && {
     url: toHttps(audio.url), level: String(audio.level || ''), bitrate: Number(audio.bitrate) || 0, gain: audio.gain ?? null, trial: false,
     ...(audio.source ? { source: audio.source } : {}),
+    ...(cleanQuality(audio.quality) ? { quality: cleanQuality(audio.quality) } : {}),
   };
 
   // 按 id 取直链。绑定的人用自己的登录态，放不了（灰 / 只有试听）再经老板实例找备用音源；

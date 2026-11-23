@@ -1,7 +1,7 @@
 // 公用版播放引擎：一个 <audio> 顺序放（口播和歌共用），队列空了就让 DJ 接着排。
 // 界面和个人版同一份（index.html / styles.css / ui.js）；这里只管公用版的播放、门口、绑定、配额、最近听过。
 import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
-import { createCovers, createChatStrip, wireImmersive, MASCOT, fmtTime, paintProgress, seekFraction, paintHeart, onEnter } from './ui.js';
+import { createCovers, createChatStrip, wireImmersive, MASCOT, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality } from './ui.js';
 
 const $ = (id) => document.getElementById(id);
 const audio = document.createElement('audio');
@@ -88,7 +88,10 @@ async function load() {
     me = await api('/api/me');
   } catch (error) {
     show('gate');
-    if (error.status !== 401 || error.code !== 'no_device') $('gateMsg').textContent = error.message;
+    // 没加入、或旧设备失效（cookie 过期 / 被移除，回 invalid 等）都安静地等输入，不报「链接或配对码不对」；
+    // 账号停用 / 到期、后台连不上这类才说。错的配对码和无效邀请链接在上面各自的地方报。
+    const quiet = error.status === 401 && !['disabled', 'expired'].includes(error.code);
+    $('gateMsg').textContent = quiet ? '' : error.message;
     return;
   }
   renderMe();
@@ -110,19 +113,12 @@ $('pairForm').addEventListener('submit', async (event) => {
 const covers = createCovers({ imgs: [...document.querySelectorAll('.cover-img')], bdA: $('bdA'), bdB: $('bdB') });
 const sized = (url, size) => (url ? `${url}?param=${size}y${size}` : '');
 
-function qualityText(song) {
-  if (!song?.level) return '';
-  if (song.level === 'lossless') return '无损';
-  const k = Math.round((song.bitrate || 0) / 1000);
-  return k ? `${k}K` : '';
-}
+// 状态条是个人版的（正在播放 / 正在念口播）；公用版只标音质
+$('nowState').classList.add('hidden');
 function setNowPlaying(song, title = '') {
   $('nowTitle').textContent = song?.title || title;
   $('nowMeta').textContent = song?.artist || '';
-  const q = qualityText(song);
-  $('nowState').textContent = q;
-  $('nowState').classList.toggle('hidden', !q);
-  $('nowState').classList.toggle('lossless', song?.level === 'lossless');
+  paintQuality($('nowQuality'), song?.quality);
   covers.paintThumbs(sized(song?.cover, 600));
   covers.setBackdrop(sized(song?.cover, 600));
   document.title = song?.title ? `${song.title} · Claudio` : 'Claudio';
@@ -241,7 +237,7 @@ async function ask(text = '') {
   $('moodInput').disabled = true;
   if (text) { chatStrip.add('user', text); showDj('…'); $('djSay').classList.add('typing'); }
   try {
-    const out = await api('/api/chat', { method: 'POST', body: { text } });
+    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on') } });
     if (typeof out.remaining === 'number') me.remaining = out.remaining;
     renderMe();
     if (out.needBind) { if (text) showStage(current ? 'lyric' : 'none'); return startQr(); }
@@ -421,6 +417,8 @@ audio.addEventListener('error', async () => {
     current.retried = true;
     // 直链过期就让后台重取；这台浏览器放不了无损（FLAC）就要普通档。再出错由这里的下一次 error 换下一首。
     audio.src = `/media/${current.id}?fresh=1${current.level === 'lossless' ? '&q=exhigh' : ''}`;
+    // 退到普通档后实际音质不知道了，不标（不猜）
+    if (current.level === 'lossless') paintQuality($('nowQuality'), null);
     audio.play().catch(() => {});
     return;
   }

@@ -124,3 +124,65 @@ test('没人在听就不备节目，有人连上后 ensure 才开始', async (t)
   listeners = 1; service.ensure(); await settle();
   assert.equal(service.snapshot().buffered, 2);
 });
+
+test('驾驶模式开关的旧做法 invalidate 会清空备好的节目（进驾驶后按下一首就得等重新生成）', async (t) => {
+  let count = 0;
+  const service = createEpisodeBuffer({ build: async () => ep(String(++count)) });
+  t.after(() => service.dispose()); service.ensure(); await settle();
+  assert.equal(service.snapshot().buffered, 2);
+  service.invalidate();
+  assert.equal(service.snapshot().buffered, 0);
+  assert.equal(await service.claim('right-after'), null);
+});
+
+test('reviseSays：备好的节目留着，只把口播改短、重新合成；领取过的也改，正在放的不动', async (t) => {
+  let count = 0; const events = []; const spoken = [];
+  const voices = [];
+  const service = createEpisodeBuffer({
+    build: async () => ({ ...ep(String(++count)), say: '第一句比较长的开场白。第二句接着聊点别的。' }),
+    synthesize: (text, { signal }) => { spoken.push(text); const d = deferred(); voices.push({ text, d, signal }); signal.addEventListener('abort', () => d.reject(signal.reason), { once: true }); return d.promise; },
+    emit: (e) => events.push(e),
+  });
+  t.after(() => service.dispose());
+  service.ensure(); await settle();
+  assert.equal(service.snapshot().buffered, 2);
+  // 第一段语音合成好了，第二段还在合成
+  voices[0].d.resolve({ url: '/tts/long-1.mp3' }); await settle();
+  const claimed = await service.claim('c1'); await settle();
+  assert.equal(claimed.queue[0].type, 'tts');
+
+  const n = service.reviseSays((say) => say.split('。')[0] + '。');
+  assert.equal(n, 3); // 领取的 1 段 + 补齐的 2 段
+  assert.equal(service.snapshot().buffered, 2); // 没作废
+  assert.equal(claimed.say, '第一句比较长的开场白。');
+  assert.equal(claimed.queue.some((q) => q.type === 'tts'), false);
+  assert.equal(claimed.voice.status, 'pending');
+  assert.equal(voices[1].signal.aborted, true); // 旧的长口播合成停掉
+  const revised = events.filter((e) => e.kind === 'sayRevised');
+  assert.equal(revised.length, 3);
+  assert.ok(revised.every((e) => e.say === '第一句比较长的开场白。' && e.voice === 'pending'));
+  assert.deepEqual(spoken.slice(-3), Array(3).fill('第一句比较长的开场白。'));
+  // 短口播合成好：照常 voiceReady
+  voices.at(-3).d.resolve({ url: '/tts/short.mp3' }); await settle();
+  assert.ok(events.some((e) => e.kind === 'voiceReady' && e.text === '第一句比较长的开场白。'));
+  // 已经短了：再改不动
+  assert.equal(service.reviseSays((say) => say.split('。')[0] + '。'), 0);
+  // 开播时语音还没好就跳过口播直接放歌
+  service.start(claimed.id, 'c1');
+  assert.equal(claimed.say, '第一句比较长的开场白。');
+});
+
+test('reviseSays：语音本来就跳过的（5090 不在）保持跳过，不去合成', async (t) => {
+  let count = 0; const spoken = [];
+  const service = createEpisodeBuffer({
+    build: async () => ({ ...ep(String(++count)), say: '很长的一段话。还有第二句。' }),
+    synthesize: async (text) => { spoken.push(text); throw new Error('5090 离线'); },
+  });
+  t.after(() => service.dispose());
+  service.ensure(); await settle();
+  const before = spoken.length;
+  service.reviseSays((say) => say.split('。')[0] + '。');
+  await settle();
+  assert.equal(spoken.length, before);
+  assert.ok(service.held().every((e) => e.voice.status === 'skipped' && e.say === '很长的一段话。'));
+});

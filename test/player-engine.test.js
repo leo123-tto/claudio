@@ -23,7 +23,7 @@ const visualSource = [
   visualModule('lyrics', 'parseLrc, createLyricView, startLyricClock, LYRIC_LEAD'),
   visualModule('subtitle', 'typewriter, renderStatic'),
   visualModule('window-mode', 'startWindowMode, toggleFullscreen, onModeChange, createIdleHider'),
-  visualModule('ui', 'createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter'),
+  visualModule('ui', 'createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality'),
   visualModule('voice-stream', 'attachVoice'),
   visualModule('handoff', 'deviceIdentity'),
 ].join('\n');
@@ -913,6 +913,41 @@ test('下一期语音按 ready、pending、skipped 状态进入歌曲尾声', as
     music.emit('timeupdate'); await flush();
     await h.clock.advance(800);
     assert.equal(h.engine.voice.playCalls, 1);
+  });
+
+  await t.test('开驾驶模式后 sayRevised：短口播没好时不放旧的长口播', async () => {
+    const h = createHarness(), music = await playSong(h);
+    const ep = withVoice(episode('驾驶前备好的歌'), 'pending');
+    h.route('/api/next', response({ ok: true, episode: ep }));
+    await h.engine.requestNext();
+    h.ws({ kind: 'voiceReady', episodeId: ep.id, epoch: 0, url: '/tts/long.mp3', text: ep.say });
+    h.engine.voice.canplay(); await flush();
+    h.ws({ kind: 'sayRevised', episodeId: ep.id, say: '短的一句。', voice: 'pending' });
+    await flush();
+    music.currentTime = music.duration - 8;
+    music.emit('timeupdate'); await flush();
+    await h.clock.advance(800);
+    assert.equal(h.engine.voice.playCalls, 0);
+  });
+
+  await t.test('开驾驶模式后 sayRevised：手上那段的旧长口播换掉，等短口播；歌不丢', async () => {
+    const h = createHarness(), music = await playSong(h);
+    const ep = withVoice(episode('驾驶前备好的歌'), 'pending');
+    h.route('/api/next', response({ ok: true, episode: ep }));
+    await h.engine.requestNext();
+    h.ws({ kind: 'voiceReady', episodeId: ep.id, epoch: 0, url: '/tts/long.mp3', text: ep.say });
+    await flush();
+    h.ws({ kind: 'sayRevised', episodeId: ep.id, say: '短的一句。', voice: 'pending' });
+    await flush();
+    h.ws({ kind: 'voiceReady', episodeId: ep.id, epoch: 0, url: '/tts/short.mp3', text: '短的一句。' });
+    h.engine.voice.canplay(); await flush();
+    assert.equal(h.engine.voice.src, '/tts/short.mp3');
+    assert.equal(h.engine.active, music);
+    music.currentTime = music.duration - 8;
+    music.emit('timeupdate'); await flush();
+    await h.clock.advance(800);
+    assert.equal(h.engine.voice.playCalls, 1);
+    assert.equal(h.engine.voice.src, '/tts/short.mp3');
   });
 
   await t.test('pending 到歌曲结束仍未就绪就跳过口播，迟到 ready 不能插入', async () => {
