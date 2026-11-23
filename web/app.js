@@ -779,7 +779,10 @@ function newGeneration({ preservePending = false, preserveMusic = false } = {}) 
   } else { resumeTracks.clear(); resumeVolumes.clear(); }
   fillerPromise = null;
   if (!preservePending) { abandonPending(); for (const holder of [...heldClaims]) releaseClaim(holder); }
-  if (voiceContext && !voiceContext.holder?.started) releaseClaim(voiceContext.holder);
+  else { clearTimeout(claimPoll); claimPoll = null; } // 计时器上面已清掉，变量也清，不然再也不领下一期
+  // 留着的下一期正等着念段间口播：口播停掉，节目留着，之后照常再念
+  const keep = preservePending && voiceContext?.holder && voiceContext.holder === pendingEpisode;
+  if (voiceContext && !voiceContext.holder?.started && !keep) releaseClaim(voiceContext.holder);
   sayOnEnd?.abort(); sayOnEnd = null;
   voiceContext = null; slots.delete(voice);
   releaseHeldMusic({ resume: preserveMusic });
@@ -1890,7 +1893,7 @@ function setChatBed(on) {
   if (on) {
     chatState.timer = setTimeout(() => {
       // 在等她回话或她正在念：还在聊，接着等
-      if (busy || voiceContext || currentRequestId) { setChatBed(true); return; }
+      if (busy || voiceContext) { setChatBed(true); return; }
       setChatBed(false);
     }, CHAT_IDLE_MS);
   }
@@ -2146,7 +2149,8 @@ function resumePlayback() {
   } else {
     for (const track of resumeTracks) {
       envelopes.delete(track);
-      const target = resumeVolumes.get(track) ?? (track === voice ? sayVol() : musicTarget());
+      // 音乐按现在该在的音量接着放：暂停期间聊天背景可能已经恢复或退出了
+      const target = track === voice ? (resumeVolumes.get(track) ?? sayVol()) : musicTarget();
       setTrackVol(track, 0);
       const gen = playbackGen;
       track.pause();
