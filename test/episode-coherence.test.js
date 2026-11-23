@@ -85,3 +85,11 @@ test('选歌落空时保留大脑原话，只把歌名换成实际播的；没�
   assert.equal(correctSay(say, [p1, p2], [s1]),
     '夜深了，风停了。先放李荣浩的《恋人》，那种藏在心里的喜欢，最适合这个点。它会慢慢把你接住。');
 });
+
+test('几首候选是同一位歌手时，光提歌手名不算点了备选，说的两首都在放就原样保留', () => {
+  const planned = [{ title: '沙龙', artist: '陈奕迅' }, { title: '十面埋伏', artist: '陈奕迅' }, { title: '富士山下', artist: '陈奕迅' }];
+  const say = '陈奕迅的歌今天挑两首叙事感的，先听《沙龙》，再听《十面埋伏》。';
+  assert.equal(correctSay(say, planned, planned.slice(0, 2)), say);
+  // 说到的第二首放不了、换成备选：照旧按歌名换掉
+  assert.equal(correctSay(say, planned, [planned[0], planned[2]]), '陈奕迅的歌今天挑两首叙事感的，先听《沙龙》，再听《富士山下》。');
+});

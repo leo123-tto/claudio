@@ -63,6 +63,11 @@ function renderMe() {
   // 音质只有绑定的会员能选（别的一直是 320k）
   $('qualityGroup').classList.toggle('hidden', !(me.bound && me.vip));
   for (const b of $('qualitySeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (me.quality || 'lossless')));
+  for (const b of $('talkSeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (me.talk || 'normal')));
+  // 本地语气扩展：服务端数据目录里有那份文件才出现，名字也由文件定
+  $('adultGroup').classList.toggle('hidden', !me.adultLabel);
+  $('adultTitle').textContent = me.adultLabel || '';
+  for (const b of $('adultSeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (me.adult ? 'on' : 'off')));
 }
 
 async function load() {
@@ -247,7 +252,7 @@ async function ask(text = '') {
   $('moodInput').disabled = true;
   if (text) { chatStrip.add('user', text); showDj('…'); $('djSay').classList.add('typing'); }
   try {
-    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on'), smooth } });
+    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on'), smooth, ahead: Boolean(current) } });
     if (typeof out.remaining === 'number') me.remaining = out.remaining;
     renderMe();
     if (out.needBind) { if (text) showStage(current ? 'lyric' : 'none'); return startQr(); }
@@ -258,6 +263,7 @@ async function ask(text = '') {
       if (out.voice || out.say) Object.assign(out.songs[0], { voice: out.voice || '', say: out.say || '' });
       // 点歌或空档时最多等 4 秒口播；正在放时预取的那批还早，后台慢慢取
       const voiceReady = prefetchVoice(out.songs[0]);
+      for (const song of out.songs.slice(1)) prefetchVoice(song); // 后面几首的报幕是后台现写的，慢慢取
       if (text || !current) await Promise.race([voiceReady, new Promise((r) => setTimeout(r, 4000))]);
       queue = text ? out.songs : [...queue, ...out.songs];
       if (text || !current) { wantPlay = true; playNext(); }
@@ -305,13 +311,16 @@ $('vol').value = Number(store.get('dj_vol') ?? 100);
 $('vol').addEventListener('input', () => { store.set('dj_vol', $('vol').value); applyVolume(); });
 
 // 口播：服务端给了 voice 就先在后台取成 blob（老板那边不闲会回 204，就没有）；轮到这首时取好了就先念、念完放歌，
-// 没取好就直接放歌，不等。口播和歌用同一个 <audio>（iOS 上第二个音频元素不一定让自动出声）。
+// 没取好就直接放歌，不等。
+// 后台现写的报幕，字在响应头 X-Say 里，取到就换掉模板句（没语音也有字）。口播和歌用同一个 <audio>（iOS 上第二个音频元素不一定让自动出声）。
 let mode = 'song';
 let voiceTimer = null;
 async function prefetchVoice(song) {
   if (!song?.voice || song.voiceUrl) return;
   try {
-    const res = await fetch(`/api/voice/${encodeURIComponent(song.voice)}`, { credentials: 'same-origin' });
+    const res = await fetch(`/api/voice/${encodeURIComponent(song.voice)}`, { credentials: 'same-origin', signal: AbortSignal.timeout(90_000) });
+    const say = res.headers.get('X-Say');
+    if (say) song.say = decodeURIComponent(say);
     if (res.status === 200) song.voiceUrl = URL.createObjectURL(await res.blob());
   } catch { /* 不念就不念 */ }
 }
@@ -622,6 +631,22 @@ $('qualitySeg').addEventListener('click', async (event) => {
   smooth = false;
   stalls = 0;
   try { sessionStorage.removeItem('dj_smooth'); } catch { /* 无痕窗口 */ }
+});
+
+// 口播频率、本地语气扩展：选了就记在服务端（换设备也算）
+$('talkSeg').addEventListener('click', async (event) => {
+  const value = event.target.closest('button')?.dataset.value;
+  if (!value || value === me.talk) return;
+  try { await api('/api/talk', { method: 'POST', body: { level: value } }); } catch (error) { return setNotice(error.message); }
+  me.talk = value;
+  renderMe();
+});
+$('adultSeg').addEventListener('click', async (event) => {
+  const value = event.target.closest('button')?.dataset.value;
+  if (!value || (value === 'on') === Boolean(me.adult)) return;
+  try { await api('/api/adult', { method: 'POST', body: { on: value === 'on' } }); } catch (error) { return setNotice(error.message); }
+  me.adult = value === 'on';
+  renderMe();
 });
 
 $('memBtn').addEventListener('click', async () => {

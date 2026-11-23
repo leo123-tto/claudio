@@ -83,6 +83,9 @@ import { roomStore } from './room-store.js';
 import { decodeVoiceAudio, transcribeAudio } from './voice.js';
 import { createDriveState, oneSentence } from './drive.js';
 import { appVersion } from './version.js';
+import { stripTags } from './tts/tags.js';
+import { readToneExtension, toneFor, toneKey, ttsText } from './tone.js';
+import { applyTalk, createTalkTracker, createTodayFile, effectiveTalk, hourKeyOf, speakReasons, talkAck, talkFromText } from './talk.js';
 
 export const services = { plan: llmPlan, stream: callLlmStream, ncm, synthesize, prepareLiveTts,
   listOutputs, selectOutput, openBluetoothSettings, playExclusive, stopExclusive,
@@ -152,7 +155,10 @@ function clientError(error) {
 
 function commitEpisode(ep, userInput = '') {
   if (userInput) state.addMessage('user', userInput);
-  state.addMessage('claudio', ep.say);
+  // 这一期开口了才记进对话、才算「上一次开口」；没开口的只算在听
+  if (ep.say && !ep.muted) talkTracker.markSpoken(ep.speakStamp || talkStamp());
+  else talkTracker.markPlayed();
+  if (!ep.muted) state.addMessage('claudio', ep.say);
   const recommendation = historyDetails.get(ep) || {};
   if (recommendation.fingerprint && ep.queue.some((item) => item.type === 'song')) {
     const playedLane = ep.queue.map((item) => item.meta?.lane).find((lane) => ['popular', 'fresh', 'classic'].includes(lane));
@@ -189,7 +195,37 @@ function updatePins() {
 }
 
 const driveState = createDriveState();
+// 此刻的口播语气档（server/tone.js）；本地语气扩展只在个人版、设置里开着时用
+function currentTone() {
+  return toneFor(toneKey({ scene: currentScene(), drive: driveState.on() }));
+}
+function toneExtensionOn() { return getSettings().voice?.toneExtension !== false; }
+
+// 口播频率（server/talk.js）：长期档在设置 voice.talk，「今天…」的临时档在 cache/talk.json，到本地午夜失效
+const talkToday = createTodayFile(path.join(config.paths.cache, 'talk.json'));
+const talkTracker = createTalkTracker();
+function talkLevel() {
+  return effectiveTalk({ level: getSettings().voice?.talk, today: talkToday.read() });
+}
+function setTalk(change) {
+  if (change.today) talkToday.write(applyTalk({ level: getSettings().voice?.talk }, change).today);
+  else {
+    updateSettings({ voice: { talk: change.level } });
+    talkToday.write(null);
+  }
+}
+// 此刻的时段不看驾驶模式（驾驶只管缩短口播）；睡前场景就是道别
+function talkStamp(at = Date.now()) {
+  const now = new Date(at);
+  const scene = currentScene(now);
+  return { at, tier: toneKey({ now, scene }), mood: recommendationMood, hourKey: hourKeyOf(at), closing: scene.key === 'sleep' };
+}
 const episodeBuffer = createEpisodeBuffer({
+  // 领取时定这一期说不说：当面说话的回复不走领取，永远开口
+  speaks: (ep) => {
+    ep.speakStamp = talkStamp();
+    return speakReasons(talkLevel(), talkTracker.context(ep.speakStamp)).length > 0;
+  },
   capacity: config.episodeBuffer,
   enabled: () => process.env.CLAUDIO_SKIP_PREFETCH !== '1',
   hasClients: () => clients.size > 0,
@@ -259,7 +295,7 @@ function providerAvailability() {
 }
 
 function publicSettings(settings = getSettings()) {
-  return toPublicSettings(settings, providerAvailability(), credentialStatus());
+  return toPublicSettings(settings, providerAvailability(), credentialStatus(), { toneExtension: readToneExtension() });
 }
 
 const RESOLVE_BUDGET_MS = 20_000;
@@ -273,7 +309,7 @@ function sameSong(song, other) {
 }
 
 // byOrder：点了曲风或当面点歌时，按大脑点名先后放前两首；自动节目用 pickDiverse 搭配桥接和发现。
-function assemblePlayable(resolved, recommendation = {}, byOrder = false) {
+function assemblePlayable(resolved, recommendation = {}, byOrder = false, limit = 2) {
   const playable = resolved
     .filter(({ resolved: song }) => song.playable)
     .map(({ candidate, resolved: song }) => ({
@@ -284,13 +320,14 @@ function assemblePlayable(resolved, recommendation = {}, byOrder = false) {
       playOrder: candidate.playOrder,
     }));
   // pickDiverse 把桥接歌排前面；放的时候按口播提歌的先后。
-  const picked = byOrder ? orderByPlayOrder(playable).slice(0, 2) : pickDiverse(playable, recommendation.discoveryLane);
+  // 话多档一段只放一首：按大脑点名的先后取第一首（口播就是按它写的），不让桥接排序换掉
+  const picked = byOrder || limit === 1 ? orderByPlayOrder(playable).slice(0, limit) : pickDiverse(playable, recommendation.discoveryLane);
   return { resolved, songs: orderByPlayOrder(picked) };
 }
 
 export async function finalizeEpisode(result, {
   recommendation = {}, signal, resolveLimit = 0, epoch = episodeBuffer.snapshot().epoch, chat = false,
-  nowPlaying = null, resolveTimeout = RESOLVE_BUDGET_MS,
+  nowPlaying = null, resolveTimeout = RESOLVE_BUDGET_MS, tone = currentTone(), single = false,
 } = {}) {
   signal?.throwIfAborted();
   const constraints = styleConstraints(recommendation.styleRequest);
@@ -362,7 +399,7 @@ export async function finalizeEpisode(result, {
       seen.push(song);
       playable.push({ candidate, resolved: song });
     }
-    return assemblePlayable(playable, recommendation, styleMode || chat).songs;
+    return assemblePlayable(playable, recommendation, styleMode || chat, single ? 1 : 2).songs;
   }
   let songs = await select(false);
   if (result.intent === 'recommend' && styleMode && !songs.length) songs = await select(true);
@@ -391,8 +428,10 @@ export async function finalizeEpisode(result, {
     : result.intent === 'recommend' ? correctSay(result.say, result.play || [], songs) : result.say;
   // 驾驶模式：提示词已经要求一句话，这里再兜一次底
   const say = driveState.on() ? oneSentence(fullSay) : fullSay;
+  // 念的版本：大脑原话没被改过才带它写的演出标记；改过（校正歌名、驾驶模式截短、没歌可放）就念干净的
+  const sayTts = say ? ttsText(say === result.say ? (result.sayTagged || say) : say, tone) : '';
   const ep = {
-    id: randomUUID(), epoch, sayWrittenAt: Date.now(), say, intent: result.intent,
+    id: randomUUID(), epoch, sayWrittenAt: Date.now(), say, sayTts, intent: result.intent,
     action: result.action, actionValue: result.actionValue, reason: result.reason,
     voice: { status: say && !(emptyRecommendation && !chat) ? 'pending' : 'skipped' },
     queue: songs.map((song) => ({ type: 'song', url: services.cache.has(song.id) ? `/media/${song.id}` : song.url,
@@ -420,10 +459,12 @@ async function buildEpisode({ userInput = '', mood = '', sleep = null, nowPlayin
   briefSay = false, resolveLimit = 0, resolveTimeout, signal, epoch = episodeBuffer.snapshot().epoch,
   excludeSongs = episodeBuffer.exclusions(), recentSays = episodeBuffer.held().map((ep) => ep.say),
 } = {}) {
-  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, briefSay, excludeSongs, recentSays, drive: driveState.on() });
+  // 话多档：自动节目一段只放一首，每首歌前都有口播（点歌不受影响）
+  const single = !userInput && talkLevel() === 'chatty';
+  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, briefSay, excludeSongs, recentSays, drive: driveState.on(), toneExtension: toneExtensionOn(), singleSong: single });
   const result = await services.plan(bundle.prompt, { signal });
   signal?.throwIfAborted();
-  return finalizeEpisode(result, { recommendation: bundle.recommendation, resolveLimit, resolveTimeout, signal, epoch, nowPlaying });
+  return finalizeEpisode(result, { recommendation: bundle.recommendation, resolveLimit, resolveTimeout, signal, epoch, nowPlaying, tone: bundle.tone, single });
 }
 
 // 点歌时大脑每写完一首就先去网易云找，等整段写完再用；只留一分钟，过期不用。
@@ -447,36 +488,56 @@ function takeEarlyResolve(song) {
 
 async function buildEpisodeStream({ userInput = '', mood = '', sleep = null, nowPlaying = null, signal, isCurrent, mark = () => {} }, send) {
   const isValid = () => isCurrent() && !signal.aborted;
-  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying,
+  const drive = driveState.on();
+  const bundle = buildPromptBundle({ userInput, mood, sleep, nowPlaying, drive, toneExtension: toneExtensionOn(),
     excludeSongs: episodeBuffer.exclusions(), recentSays: episodeBuffer.held().map((ep) => ep.say) });
+  const { tone } = bundle;
+  // 大脑写的 say 带演出标记：页面和记录用去掉标记的（驾驶模式再截成一句），语音用带标记、带时段语气的
+  const tidy = (raw) => String(raw || '').replace(/\s+/g, ' ').trim();
+  const shown = (raw) => (drive ? oneSentence(stripTags(tidy(raw))) : stripTags(tidy(raw)));
+  const spoken = (raw) => ttsText(drive ? shown(raw) : tidy(raw), tone);
   let live = null;
+  let liveText = '';
+  let liveSay = '';
+  let liveAbort = null;
   let episode = null;
   let voiceFailed = false;
   let voiceReady = false;
+  // 口播稿一写完就先合成（不等选歌）；推荐的口播要等选歌定下、确认没被改写才放出去，改写了就作废重来
+  let confirmed = false;
+  let readySent = false;
   function fail() {
     if (!isValid() || voiceFailed) return;
     voiceFailed = true;
     if (episode) { episode.voice = { status: 'skipped' }; episode.queue = episode.queue.filter((q) => q.type !== 'tts'); }
     send({ kind: 'sayFailed' });
   }
-  function startVoice(say) {
-    if (!say || live || voiceFailed || !isValid()) return;
+  function announce() {
+    if (readySent || !voiceReady || !confirmed || voiceFailed || !isValid()) return;
+    readySent = true;
+    if (episode) {
+      episode.voice = { status: 'ready' };
+      episode.queue.unshift({ type: 'tts', url: live.url, text: liveSay });
+    }
+    send({ kind: 'sayReady', say: liveSay, url: live.url });
+  }
+  function startVoice(text, say) {
+    if (!text || live || voiceFailed || !isValid()) return;
     try {
-      live = ['fish', 'pc5090'].includes(getSettings().tts.provider)
-        ? services.prepareLiveTts(say, { signal, onError: fail })
-        : { ready: services.synthesize(say, { signal }).then((audio) => { live.url = audio.url; }) };
+      const controller = new AbortController();
+      const voiceSignal = AbortSignal.any([signal, controller.signal]);
+      const current = ['fish', 'pc5090'].includes(getSettings().tts.provider)
+        ? services.prepareLiveTts(text, { signal: voiceSignal, onError: () => { if (live === current) fail(); } })
+        : { ready: services.synthesize(text, { signal: voiceSignal }).then((audio) => { current.url = audio.url; }) };
+      live = current; liveText = text; liveSay = say; liveAbort = controller;
       mark('voiceStart');
-      Promise.resolve(live.ready).then(() => {
-        if (!isValid() || voiceFailed) return;
+      Promise.resolve(current.ready).then(() => {
+        if (live !== current || !isValid() || voiceFailed) return;
         mark('voiceReady');
         voiceReady = true;
-        if (!live.cached) voiceRecovered();
-        if (episode) {
-          episode.voice = { status: 'ready' };
-          episode.queue.unshift({ type: 'tts', url: live.url, text: say });
-        }
-        send({ kind: 'sayReady', say, url: live.url });
-      }, fail);
+        if (!current.cached) voiceRecovered();
+        announce();
+      }, () => { if (live === current) fail(); });
     } catch { fail(); }
   }
   mark('llmStart');
@@ -485,28 +546,44 @@ async function buildEpisodeStream({ userInput = '', mood = '', sleep = null, now
     mark('llmFirst');
     if (isValid()) for (const song of extractClosedPlayItems(text).slice(0, 3)) startEarlyResolve(song, signal);
     if (!draftSent && isValid()) {
-      // 口播稿一写完就先推文字，前端不用等选歌和合成
+      // 口播稿一写完就先推文字、先合成，前端不用等选歌
       const draft = extractSayValue(text);
-      if (draft) { draftSent = true; mark('sayDraft'); send({ kind: 'sayDraft', say: draft }); }
+      if (draft) {
+        draftSent = true;
+        mark('sayDraft');
+        send({ kind: 'sayDraft', say: shown(draft) });
+        startVoice(spoken(draft), shown(draft));
+      }
     }
-    if (!isValid() || live) return;
-    const intent = extractClosedString(text, 'intent');
-    if (['chat', 'control'].includes(intent)) startVoice(extractSayValue(text));
+    // 聊天、控制不换歌，口播不会被改写：合成好了就放
+    if (!confirmed && ['chat', 'control'].includes(extractClosedString(text, 'intent'))) { confirmed = true; announce(); }
   } });
   signal.throwIfAborted();
   mark('llmDone');
   const obj = extractJson(raw);
   if (!obj || typeof obj.say !== 'string') throw new Error('大脑返回的节目格式不完整');
   const result = normalizeResult(obj);
-  episode = await finalizeEpisode(result, { recommendation: bundle.recommendation, signal, chat: true, nowPlaying });
+  episode = await finalizeEpisode(result, { recommendation: bundle.recommendation, signal, chat: true, nowPlaying, tone });
   signal.throwIfAborted();
   mark('songsReady');
-  // 推荐口播必须等最终可播歌确定并校正后再开声。
-  if (!live) startVoice(episode.say);
+  if (live && liveText !== episode.sayTts) {
+    // 选歌后口播被改写（歌名校正、没找到能放的）：先合成的那段作废，按最终稿重来
+    mark('voiceRedo');
+    // 只记为什么重来（不记口播原文）：rewritten = 选歌后 say 被校正 / 截短；diffAt = 两版第一个不同的位置
+    const diffAt = [...liveText].findIndex((ch, i) => ch !== [...episode.sayTts][i]);
+    console.log('[voice-redo]', JSON.stringify({ rewritten: episode.say !== result.say, tagged: result.sayTagged !== result.say,
+      live: [...liveText].length, final: [...episode.sayTts].length, diffAt }));
+    liveAbort?.abort(new Error('口播已改写'));
+    live = null; voiceReady = false; readySent = false;
+  }
+  confirmed = true;
+  if (!live) startVoice(episode.sayTts, episode.say);
   if (voiceFailed) episode.voice = { status: 'skipped' };
   else if (voiceReady) {
-    episode.voice = { status: 'ready' };
-    episode.queue.unshift({ type: 'tts', url: live.url, text: episode.say });
+    if (readySent) {
+      episode.voice = { status: 'ready' };
+      episode.queue.unshift({ type: 'tts', url: live.url, text: episode.say });
+    } else announce();
   }
   if (userInput && result.memoryCandidates?.length) {
     const evidenceId = `message-${randomUUID()}`;
@@ -573,6 +650,14 @@ app.post('/api/chat', async (req, res) => {
   try {
     const { input = '', mood = '', sleep = null, nowPlaying = null } = req.body ?? {};
     const { userInput, control } = route(input);
+    // 「少说点」「今天别打扰我」：记下口播频率，回一句确认。不打大脑；话多档进出时备好的节目是一首一段 / 两首一段，作废重备
+    const talkChange = !control && !mood && !sleep ? talkFromText(userInput) : null;
+    if (talkChange) {
+      const wasChatty = talkLevel() === 'chatty';
+      setTalk(talkChange);
+      if (wasChatty !== (talkLevel() === 'chatty')) episodeBuffer.invalidate();
+      return reply({ ok: true, control: { intent: 'control', action: 'talk', actionValue: 0, reply: talkAck(talkChange) }, streamed: false });
+    }
     if (mood || styleConstraints(userInput).length) {
       recommendationMood = mood || userInput;
       episodeBuffer.invalidate();
@@ -1228,7 +1313,9 @@ app.post('/api/sleep', (_req, res) => { episodeBuffer.idle(); res.json({ ok: tru
 // 开驾驶模式时备好的节目不作废（作废了按「下一首」要等现场重新生成），只把口播改成一句、重新合成；
 // 之后新备的节目按驾驶模式写。关掉时已改短的就短着放，后面的照常。
 app.post('/api/drive', (req, res) => {
-  if (driveState.set(req.body?.on === true) && driveState.on()) episodeBuffer.reviseSays(oneSentence);
+  if (driveState.set(req.body?.on === true) && driveState.on()) {
+    episodeBuffer.reviseSays(oneSentence, (say) => ttsText(say, toneFor('drive')));
+  }
   res.json({ ok: true, on: driveState.on() });
 });
 app.post('/api/episode/release', (req, res) => res.json({ ok: true, released: episodeBuffer.release(String(req.body?.claimId || '')) }));
@@ -1310,7 +1397,7 @@ function broadcast(msg) {
 // 8099 名额服务顺带给公用版念一句短口播：只在语音用 5090 且老板这边闲着时（见 pc5090.synthesizeIfIdle）
 void ncm.sources.ready();
 if (process.env.CLAUDIO_NO_LISTEN !== '1') ncm.startSharedLimitServer(undefined, {
-  tts: (text) => (getSettings().tts.provider === 'pc5090' ? synthesizeGuestLine(text) : null),
+  tts: (text) => (getSettings().tts.provider === 'pc5090' ? synthesizeGuestLine(text, { timeout: 20_000 }) : null),
 });
 if (process.env.CLAUDIO_NO_LISTEN !== '1') server.listen(config.port, config.host || undefined, () => {
   console.log(`🎙️  Claudio on http://${config.host || 'localhost'}:${config.port}  (TTS=${getSettings().tts.provider}, NCM=${config.ncm.base})`);

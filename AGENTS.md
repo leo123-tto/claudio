@@ -38,10 +38,10 @@ TTS 把稿子合成人声，网页播放器一边放歌一边念词，并能按�
 
 ```
 后台预备（episode-buffer，常备两期）
-   → context.js  把 dj-persona + taste.md + 历史 拼成 prompt
+   → context.js  把 Vera 人格 + taste.md + 历史 + 时段语气档 拼成 prompt
    → llm/        按设置调用当前大脑，normalize.js 解析 {say, play[], reason, …}
    → ncm.js  把歌名解析成可播直链   ┐
-   → tts/    把 say 合成 mp3        ┘ 并行；语音不在就跳过口播
+   → tts/    把 say 合成 mp3        ┘ 并行；口播稿一写完就先合成；语音不在就跳过口播
 你点 [开始 / 下一首]，或这期快放完
    → 前端领取一期（没备好先放垫场歌）→ 开声才报 started
    → 口播压在上一首尾奏上 → 交叉淡入放歌 → 领下一期 → ...
@@ -64,7 +64,7 @@ TTS 把稿子合成人声，网页播放器一边放歌一边念词，并能按�
 |---|---|---|
 | 大脑 | 可插拔三家：本地 OpenAI 兼容服务（默认，DeepSeek V4.1 Flash）/ Claude 订阅（CLI）/ DeepSeek 官方 API | ChatGPT、Grok、Ornith、Agent2API 于 2026-10-31 下线，旧设置读进来自动迁到本地服务。不自动回退 |
 | 音乐 | NeteaseCloudMusicApi 4.32.0（本地实例，外部服务；**没有解灰**）；音源可用插件扩展（`server/sources.js`） | search / song_url / lyric / recommend。网易云拿不到（灰、无版权、只有试听、搜索限流）时问插件 |
-| TTS | 可插拔，默认 `pc5090`（自建 GPU 机上的 Fish S2-Pro，音色 `claudio`），Fish 云端手动备用 | `server/tts/`：pc5090 / fish / say，失败不自动回退；语音服务不在时这期跳过口播只放歌。可经 ssh 隧道连到 WSL 上的服务（本机 `127.0.0.1:18081` → 远端），语音档没起来时经 ssh 叫 gpuctl 拉起（冷启动约 2 分钟）；主机名和地址都在 `.env`。整段合成、带语气提示，网页 0.9 倍播放；点歌时首句单独先合成开口、其余整段接上（`PC5090_SPLIT=1` 恢复逐句）。装在 GPU 机的 Windows 本机时不开隧道，直连 WSL，经 `wsl.exe` 调 gpuctl（`PC5090_GPUCTL=wsl`） |
+| TTS | 可插拔，默认 `pc5090`（自建 GPU 机上的 Fish Drama 3，经一层网关保持 Fish 原生 `/v1/tts`，音色 `claudio`），Fish 云端手动备用 | `server/tts/`：pc5090 / fish / say，失败不自动回退；语音服务不在时这期跳过口播只放歌。可经 ssh 隧道连到 WSL 上的服务（本机 `127.0.0.1:18081` → 远端），语音档没起来时经 ssh 叫 gpuctl 拉起（冷启动约 2 分钟）；主机名和地址都在 `.env`。网关支持 `stream_audio`（健康检查带这个字段）时整段一次要、边合成边念；不支持时退回首句先合成（`PC5090_STREAM=0` 也退回）。口播开头带时段语气提示、句内可带 Drama 3 演出标记（`server/tone.js`、`server/tts/tags.js`；只给 pc5090 念，Fish 云端和页面一律去掉），网页 0.9 倍播放。装在 GPU 机的 Windows 本机时不开隧道，直连 WSL，经 `wsl.exe` 调 gpuctl（`PC5090_GPUCTL=wsl`） |
 | 后端 | Node.js (ESM) + Express + ws | node ≥ 20 |
 | 前端 | PWA（原生 JS；三个 `<audio>`：两路音乐交叉淡入 + 一路口播；WebAudio `GainNode` 控音量/频谱；WS） | 不引重框架。包络按真实时间走，窗口隐藏也不停 |
 | 部署 | 只有网页版（2026-11-23 起不再做 Mac App），服务跑在一台常开的机器上 | 个人版：`deploy/box/` 容器（512 MB 上限，只听 127.0.0.1，经 HTTPS 反向代理或 Tailscale serve 对内网开放），电脑和手机浏览器打开同一个地址。公用版：同一台机器上另起容器 `claudio-public`（`CLAUDIO_MODE=public`，`deploy/public/`，需要自备 hub，见 `docs/hub-api.md`）。步骤见 README |
@@ -94,6 +94,9 @@ claudio/
 │  ├─ episode-audio.js       # 节目里的歌解析成可播地址（点歌总预算 20 秒、后台 90 秒）；开播前刷新过期直链
 │  ├─ episode-coherence.js   # 口播提到不会播的歌或顺序不对时才改写
 │  ├─ drive.js               # 驾驶模式：口播只说一句（DRIVE_PROMPT + oneSentence）；个人版的开关状态 2 小时自动失效
+│  ├─ tone.js                # 口播语气档：清晨 / 上班 / 午休 / 白天 / 傍晚 / 夜晚 / 深夜 / 驾驶，钟点分界 TONE_*；每档的写法、导演提示、放行哪些标记；数据目录 user/tone-extension.md 可按档追加本地要求（设置里有开关）
+│  ├─ persona.js             # DJ 人格 Vera：核心 prompts/vera.md 两版共用；个人版可追加数据目录 user/persona.md（不进仓库）；按时段切老友 / 守夜人 / 策展人，睡前最后一段用结束语
+│  ├─ talk.js                # 口播频率：话多 / 适中 / 安静 / 几乎不说；听懂「少说点」「今天别打扰我」；按开头 / 道别 / 换主题 / 整点 / 换时段定这一段说不说。当面说话的回复永远开口
 │  ├─ audio-quality.js       # 实际音质 {format, bitrate, sampleRate, bits}：网易云 song_url 的 type/br/sr，FLAC 读 64 字节文件头补位深；拿不到的不带
 │  ├─ version.js             # /api/mode 的 version：git 短号 → 部署前写的 server/version.json → package 版本 + 构建时间
 │  ├─ filler.js              # 大脑或语音没好时的垫场歌（收藏 + 最近放过；点了曲风先挑网易云曲风对得上的）
@@ -116,7 +119,8 @@ claudio/
 │  ├─ tts/
 │  │  ├─ index.js            # synthesize() 工厂 + 缓存（可插拔）
 │  │  ├─ live.js             # 口播边合成边推给前端（/api/tts/stream），念完落盘缓存
-│  │  ├─ pc5090.js           # 自建 Fish S2-Pro（默认）：隧道 + gpuctl 拉起 + 逐句合成
+│  │  ├─ pc5090.js           # 自建 Drama 3（默认）：隧道 + gpuctl 拉起；网关能流式就整段边合成边念，否则首句先合成
+│  │  ├─ tags.js             # Drama 3 演出标记：白名单清洗、成对标记不跨句、去标记（页面 / 记录 / 不认标记的语音）
 │  │  ├─ fish.js             # Fish Audio 云端（手动备用）
 │  │  ├─ abort.js            # 合成可取消（换歌 / 作废节目时停掉在途请求）
 │  │  └─ say.js              # macOS say 手工开发选项（不参与自动兜底）
@@ -135,7 +139,9 @@ claudio/
 │  ├─ mood-rules.md          # 情绪规则 ✅ 注入（按状态 / 天气 / 时段调整）
 │  └─ playlists.json         # 歌单 ✅ 注入（填真实歌单即生效，占位示例自动过滤）
 ├─ prompts/
-│  └─ dj-persona.md          # DJ 人设系统提示词
+│  ├─ vera.md                # DJ 人格 Vera 的核心（两版共用，不含任何听众的个人信息）
+│  ├─ public-dj.md           # 公用版的规矩和输出契约
+│  └─ dj-persona.md          # 个人版输出契约的说明（实际提示词在 server/context.js）
 ├─ scripts/
 │  ├─ spike-tts.mjs          # TTS 冒烟测试
 │  ├─ gen-favorites.mjs      # 歌单 → user/favorites.md 曲库
@@ -169,6 +175,7 @@ claudio/
 
 `say`、`intent`（chat / recommend / control）、`action`、`actionValue`、`play`、`reason`、`memoryCandidates`。
 
+- `say`：40–80 字，要有内容（为什么此刻放、有把握的背景、偶尔聊一句），不引歌词、不编背景。可带 Drama 3 演出标记（白名单见 `server/tts/tags.js`，按语气档放行）；`normalize.js` 出两份：`say` 去标记（页面、记录、校正都用它），`sayTagged` 原样，节目上的 `sayTts` = 时段语气提示 + 清洗后的标记，只给语音。
 - `play` 为 `[]` = 不换歌。推荐才给候选：默认 3 个，点了曲风 / 乐器 / 情绪给 5 个，只放前两首；聊天和控制不给歌。
 - 点了曲风时，模型选的歌要有网易云曲风证据（钢琴 → 纯音乐 / 轻音乐 / 新世纪 / 古典等）才放；一首都没有时才对「最近听过」放宽一次。
 - 暂停、换歌、音量等短句由 `server/intent.js` 直接执行，不打模型。
@@ -272,7 +279,7 @@ MVP 4 条 → 全功能 6 条：
 |---|---|---|---|
 | POST | `/slot` | `{"kind":"chat"\|"background"}` | `{"ok":true}` 放行；`{"ok":false,"retryMs":N}` 过 N 毫秒再要；`{"ok":false,"coolingMs":N}` 网易云冷却中，这段时间别搜 |
 | POST | `/cooldown` | `{"ms":N}` | `{"ok":true}`。别的实例碰到 405 报过来，主实例跟着冷却 N 毫秒（最长 30 分钟） |
-| POST | `/tts` | `{"text":"≤25 字"}` | 主实例语音是 5090、通道 ready、没在合成 / 排队 / 拉起 / 探测、隧道开着时，低优先级念一句（超时 8 秒），回 `audio/mpeg`；否则 409 `{"skip":true}`。不开隧道、不调 gpuctl。主实例点歌碰上时最多等这一句念完 |
+| POST | `/tts` | `{"text":"纯文字 ≤100 字"}`（可带语气提示和演出标记，整串 ≤400） | 主实例语音是 pc5090、通道 ready、没在合成 / 排队 / 拉起 / 探测、隧道开着时，低优先级念一句（超时 20 秒），回 `audio/mpeg`；否则 409 `{"skip":true}`。不开隧道、不调 gpuctl。主实例要念时直接停掉这一句（主实例优先） |
 | POST | `/guest/search` | `{"keywords","limit"}` | 公用版未绑定账号时搜歌：按别的实例算名额（主实例优先，最多 6 − reserve），等不到 503 `{"busy":true}` |
 | POST | `/guest/song-url` | `{"id","level","title?","artist?","duration?"}` | 公用版未绑定账号时取播放地址；放不了且给了歌名就问音源插件。每分钟最多 40 次 |
 | POST | `/guest/find` | `{"ncmId?","title","artist","duration?","level"}` | 只问音源插件（绑定的人自己放不了时用） |

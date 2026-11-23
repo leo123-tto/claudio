@@ -79,12 +79,13 @@ test('chat所有HTTP分支回requestId/origin，mood独立生成',async()=>{
   services.stream=async()=>{throw new DOMException('This operation was aborted','TimeoutError');};
   const failed=await request('/api/chat',{input:'讲句话',requestId:'error-id'});assert.equal(failed.status,500);assert.equal(failed.body.requestId,'error-id');assert.match(failed.body.error,/大脑超过 150 秒/);assert.equal(failed.body.origin,'chat');
 });
-test('推荐先解析校正再合成，语音未完成HTTP先返回，晚失败sayFailed带身份',async()=>{
-  const voice=deferred();let voiceOptions,spoken;
-  services.prepareLiveTts=(say,options)=>{spoken=say;voiceOptions=options;return{url:'/api/tts/stream/test.mp3',ready:voice.promise};};
-  services.stream=async(_,{onText})=>{const raw=JSON.stringify(plan());onText(raw);assert.equal(spoken,undefined);return raw;};
+test('推荐口播稿先合成、选歌校正后改写就重来，语音未完成HTTP先返回，晚失败sayFailed带身份',async()=>{
+  const voice=deferred();let voiceOptions,spoken;const drafts=[];
+  services.prepareLiveTts=(say,options)=>{spoken=say;voiceOptions=options;drafts.push(options.signal);return{url:'/api/tts/stream/test.mp3',ready:voice.promise};};
+  services.stream=async(_,{onText})=>{const raw=JSON.stringify(plan());onText(raw);assert.equal(drafts.length,1);return raw;};
   services.ncm.resolve=async song=>({...song,id:String(++id),url:`https://m.126.net/${id}`,playable:song.title!=='候选甲'});
   const reply=await request('/api/chat',{input:'换一批音乐',requestId:'voice-id'});assert.equal(reply.body.ok,true);assert.equal(reply.body.episode.voice.status,'pending');assert.equal(reply.body.episode.queue[0].type,'song');assert.doesNotMatch(spoken,/候选甲/);assert.match(spoken,/候选乙/);
+  assert.equal(drafts.length,2);assert.equal(drafts[0].aborted,true);assert.equal(messages.some(m=>m.kind==='sayReady'&&m.requestId==='voice-id'),false);
   voice.resolve();await settle();assert.ok(messages.some(m=>m.kind==='sayReady'&&m.requestId==='voice-id'&&m.origin==='chat'));
   voiceOptions.onError(Error('中途断流'));await settle();assert.ok(messages.some(m=>m.kind==='sayFailed'&&m.requestId==='voice-id'&&m.origin==='chat'));
 });

@@ -124,7 +124,7 @@ export function wireImmersive({ button, isInteractionActive, onError, beforeTogg
 }
 
 // 舞台上的一行 DJ 气泡（口播 / 回话）
-export const BUBBLE_LINE = '<div class="line active enter"><span class="who">Claudio</span><div class="bubble"></div></div>';
+export const BUBBLE_LINE = '<div class="line active enter"><span class="who">Vera</span><div class="bubble"></div></div>';
 
 export const fmtTime = (s) => (isFinite(s) && s >= 0 ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00');
 

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
+import { TALK_LEVELS } from './talk.js';
 
 // 大脑只留三家：家里盒子（本地）、Claude 订阅、DeepSeek 官方。
 // ChatGPT / Grok / Ornith / Agent2API 于 2026-10-31 下线；旧设置读进来时自动改到本地。
@@ -68,6 +69,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
   }),
   playback: Object.freeze({
     quality: envAudioQuality(),
+  }),
+  // 本地语气扩展（数据目录 user/tone-extension.md，见 server/tone.js）：文件在时设置面板多一个开关，默认开
+  // talk：口播频率（话多 / 适中 / 安静 / 几乎不说，见 server/talk.js），适中就是原来的习惯
+  voice: Object.freeze({
+    toneExtension: true,
+    talk: 'normal',
   }),
 });
 
@@ -146,7 +153,7 @@ export function migrateLegacySettings(raw = {}) {
 
 export function mergeSettings(current = DEFAULT_SETTINGS, rawPatch = {}) {
   const patch = migrateLegacySettings(rawPatch);
-  assertKeys(patch, ['version', 'llm', 'tts', 'recommendation', 'playback'], '设置');
+  assertKeys(patch, ['version', 'llm', 'tts', 'recommendation', 'playback', 'voice'], '设置');
   const next = clone(current);
 
   if (patch.version !== undefined && patch.version !== 1) {
@@ -237,16 +244,31 @@ export function mergeSettings(current = DEFAULT_SETTINGS, rawPatch = {}) {
       next.playback.quality = patch.playback.quality;
     }
   }
+
+  if (patch.voice !== undefined) {
+    assertKeys(patch.voice, ['toneExtension', 'talk'], '口播设置');
+    if (patch.voice.toneExtension !== undefined) {
+      if (typeof patch.voice.toneExtension !== 'boolean') throw new TypeError('本地语气扩展开关必须是布尔值');
+      next.voice = { ...(next.voice || {}), toneExtension: patch.voice.toneExtension };
+    }
+    if (patch.voice.talk !== undefined) {
+      if (!TALK_LEVELS.includes(patch.voice.talk)) throw new TypeError('不支持的口播频率');
+      next.voice = { ...(next.voice || {}), talk: patch.voice.talk };
+    }
+  }
   return next;
 }
 
-export function toPublicSettings(settings, availability = {}, credentials = {}) {
+export function toPublicSettings(settings, availability = {}, credentials = {}, { toneExtension = null } = {}) {
   return {
     version: settings.version,
     llm: clone(settings.llm),
     tts: clone(settings.tts),
     recommendation: clone(settings.recommendation),
     playback: clone(settings.playback),
+    voice: clone(settings.voice || DEFAULT_SETTINGS.voice),
+    // 本地语气扩展只回名字，不回内容
+    toneExtension: toneExtension ? { label: toneExtension.label } : null,
     options: {
       providers: PROVIDERS,
       claudeModels: CLAUDE_MODELS,

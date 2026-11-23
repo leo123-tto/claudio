@@ -123,7 +123,7 @@
 
       <section class="stage">
         <div class="stage-head">
-          <img class="avatar" src="/mascot.png" alt="Claudio" title="Claudio 记得的事" draggable="false" />
+          <img class="avatar" src="/mascot.png" alt="Vera" title="Vera 记得的事" draggable="false" />
           <span class="stage-name">CLAUDIO</span>
           <canvas class="meter hidden" id="meter" data-cap="meter" aria-hidden="true"></canvas>
         </div>
@@ -141,7 +141,7 @@
       <p class="notice" id="notice" role="status"></p>
 
       <div class="composer">
-        <input id="moodInput" type="text" maxlength="200" placeholder="跟 Claudio 说点什么" autocomplete="off" enterkeyhint="send" />
+        <input id="moodInput" type="text" maxlength="200" placeholder="跟 Vera 说点什么" autocomplete="off" enterkeyhint="send" />
         <button class="icon-btn mic hidden" id="voiceBtn" data-cap="voice" type="button" aria-label="语音输入" title="按一下说话，再按一下送出"><svg class="ico"><use href="#i-mic"/></svg></button>
         <button class="btn-send" id="sendBtn" type="button" aria-label="发送" title="发送"><svg class="ico"><use href="#i-send"/></svg></button>
       </div>
@@ -248,6 +248,8 @@
               <button type="button" role="radio" data-value="familiar" aria-checked="false">熟悉</button>
             </div>
             <label class="field"><span>音质</span><select id="audioQualitySelect"></select></label>
+            <label class="field"><span>口播</span><select id="talkSelect"><option value="chatty">话多</option><option value="normal">适中</option><option value="quiet">安静</option><option value="minimal">几乎不说</option></select></label>
+            <label class="field hidden" id="toneExtensionField"><span id="toneExtensionLabel"></span><select id="toneExtensionSelect"><option value="on">开</option><option value="off">关</option></select></label>
           </section>
 
           <section class="group">
@@ -300,6 +302,22 @@
             </div>
           </section>
           <section class="group">
+            <h3>口播</h3>
+            <div class="seg" id="talkSeg" role="radiogroup" aria-label="口播">
+              <button type="button" role="radio" data-value="chatty" aria-checked="false">话多</button>
+              <button type="button" role="radio" data-value="normal" aria-checked="true">适中</button>
+              <button type="button" role="radio" data-value="quiet" aria-checked="false">安静</button>
+              <button type="button" role="radio" data-value="minimal" aria-checked="false">几乎不说</button>
+            </div>
+          </section>
+          <section class="group hidden" id="adultGroup">
+            <h3 id="adultTitle"></h3>
+            <div class="seg" id="adultSeg" role="radiogroup" aria-label="开关">
+              <button type="button" role="radio" data-value="off" aria-checked="true">关</button>
+              <button type="button" role="radio" data-value="on" aria-checked="false">开</button>
+            </div>
+          </section>
+          <section class="group">
             <h3>设备<span class="count" id="devState"></span></h3>
             <div class="row"><span class="dim">在另一台设备上输入配对码</span><button class="btn-line" id="pairBtn" type="button">添加设备</button></div>
             <div class="pair hidden" id="pairShow"></div>
@@ -336,6 +354,6 @@
       </section>
     </div>
 
-    <script src="/boot.js?v=5" type="module"></script>
+    <script src="/boot.js?v=7" type="module"></script>
   </body>
 </html>

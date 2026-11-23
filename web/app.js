@@ -26,7 +26,7 @@ const el = {};
   'testModelBtn', 'modelResult',
   'pc5090BaseUrl', 'pc5090Voice', 'fishApiKey', 'fishModelSelect', 'fishVoiceId', 'fishBalance', 'fishBalanceVal',
   'testTtsBtn', 'ttsResult', 'ttsPreview',
-  'audioQualitySelect', 'favoritesCount', 'favoritePlaylistInput', 'importFavoritesBtn', 'favoritesImportResult', 'banList',
+  'audioQualitySelect', 'toneExtensionField', 'toneExtensionLabel', 'toneExtensionSelect', 'talkSelect', 'favoritesCount', 'favoritePlaylistInput', 'importFavoritesBtn', 'favoritesImportResult', 'banList',
   'profileSummary', 'refreshProfileBtn',
 ].forEach((id) => (el[id] = $(id)));
 const progressEls = { fill: el.barFill, cur: el.curTime, dur: el.durTime };
@@ -165,6 +165,12 @@ function paintSettings() {
   el.fishVoiceId.value = tts.fish.referenceId || '';
   segSelect(el.modeSeg, recommendation.mode);
   fillSelect(el.audioQualitySelect, options.audioQualities, playback.quality);
+  // 本地语气扩展：数据目录里有那个文件才出现，名字也由文件定
+  const extension = settingsPayload.toneExtension;
+  el.toneExtensionField.classList.toggle('hidden', !extension);
+  el.toneExtensionLabel.textContent = extension?.label || '';
+  el.toneExtensionSelect.value = settingsPayload.voice?.toneExtension === false ? 'off' : 'on';
+  el.talkSelect.value = settingsPayload.voice?.talk || 'normal';
   paintCredentials();
   syncSettingsPanes();
   loadFishCredit();
@@ -223,6 +229,7 @@ async function saveSettings({ quiet = false } = {}) {
       },
       recommendation: { mode: segValue(el.modeSeg) },
       playback: { quality: el.audioQualitySelect.value },
+      voice: { talk: el.talkSelect.value, ...(settingsPayload.toneExtension ? { toneExtension: el.toneExtensionSelect.value !== 'off' } : {}) },
     }, '保存失败');
     settingsPayload = data.settings;
     paintSettings();
@@ -1660,7 +1667,7 @@ function renderStream(ep) {
     div.dataset.idx = i;
     div.style.animationDelay = `${Math.min(i, 6) * 60}ms`; // 错峰进场
     if (item.type === 'tts') {
-      div.innerHTML = `<span class="who">Claudio</span><div class="bubble">${escapeHtml(item.text)}</div>`;
+      div.innerHTML = `<span class="who">Vera</span><div class="bubble">${escapeHtml(item.text)}</div>`;
     } else {
       div.dataset.song = '1';
       div.innerHTML = `<span class="who">♪ ${escapeHtml(item.meta.title)} — ${escapeHtml(item.meta.artist)}</span><div class="lyric"></div>`;
@@ -1877,7 +1884,7 @@ function maybeEnterPending(remain = 0) {
   pendingEpisode = null; claimId = null; clearTimeout(voicePoll);
   ep.voice = { status: 'skipped' };
   ep.queue = ep.queue.filter((q) => q.type !== 'tts');
-  logChat('claudio', ep.say); setState('语音离线，先放歌');
+  logChat('claudio', ep.say); if (ep.say) setState('语音离线，先放歌');
   if (first >= 0) startMusic(ep.queue[0], 0, { episode: ep, holder });
   else { releaseClaim(holder); continueRadio(); }
 }

@@ -11,11 +11,12 @@ export function spokenTitle(title) {
   return raw.replace(/\s*[（(][^（）()]*[）)]\s*$/, '').trim() || raw;
 }
 
-function mentionAt(text, song) {
+// byArtist=false：只认歌名。几首候选是同一位歌手时，光说歌手名（「陈奕迅的歌」）不算点了其中哪一首。
+function mentionAt(text, song, byArtist = true) {
   const title = clean(song.title);
   const artist = clean(song.artist);
   const titleAt = title ? text.indexOf(title.length >= 4 ? title : `《${title}》`) : -1;
-  const artistAt = artist.length >= 2 ? text.indexOf(artist) : -1;
+  const artistAt = byArtist && artist.length >= 2 ? text.indexOf(artist) : -1;
   if (titleAt < 0) return artistAt;
   if (artistAt < 0) return titleAt;
   return Math.min(titleAt, artistAt);
@@ -50,11 +51,21 @@ export function correctSay(say, plannedSongs = [], songs = []) {
   const all = [...plannedSongs, ...songs];
   const mentions = [];
   const seen = new Set();
+  const artistCount = new Map();
   for (const song of all) {
     const key = keyOf(song);
     if (seen.has(key)) continue;
     seen.add(key);
-    const at = mentionAt(normalized, song);
+    const artist = clean(song.artist);
+    artistCount.set(artist, (artistCount.get(artist) || 0) + 1);
+  }
+  const byArtist = (song) => artistCount.get(clean(song.artist)) === 1;
+  seen.clear();
+  for (const song of all) {
+    const key = keyOf(song);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const at = mentionAt(normalized, song, byArtist(song));
     if (at >= 0) mentions.push({ key, at, song });
   }
   mentions.sort((a, b) => a.at - b.at);
@@ -73,7 +84,7 @@ export function correctSay(say, plannedSongs = [], songs = []) {
   let lastMapped = false;
   let announced = false;
   for (const sentence of sentences) {
-    const named = mentions.filter((item) => mentionAt(clean(sentence), item.song) >= 0);
+    const named = mentions.filter((item) => mentionAt(clean(sentence), item.song, byArtist(item.song)) >= 0);
     if (!named.length) {
       if (referring.test(sentence) && !lastMapped) continue; // 指代的是被删掉的歌，或开头就指代旧歌
       kept.push(sentence.trim());

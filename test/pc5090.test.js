@@ -183,12 +183,11 @@ test('合成比实时快：逐句要 MP3，第一句好了就开口', async () =
     chunks.push(chunk);
   }
   assert.deepEqual(events, ['tts:晚上好，这里是 Claudio。', 'yield', 'tts:今晚有点凉，给你放一首老歌吧。', 'yield']);
+  // normalize、use_memory_cache 是 S2 的参数，Drama 3 网关不认，不再传
   assert.deepEqual(log[0], {
     text: '晚上好，这里是 Claudio。',
     reference_id: 'claudio',
     format: 'mp3',
-    use_memory_cache: 'on',
-    normalize: true,
   });
   assert.deepEqual(Buffer.concat(chunks), frames(80));
 });
@@ -1163,4 +1162,40 @@ test('点歌先念的第一句是一句完整的话、约 3 秒（14 字起）�
   const [head, rest] = splitHead('午休时间，来点轻松的。给你放一首郭采洁的《你在 不在》，声音软软的，适合发会儿呆。');
   assert.equal(head, '午休时间，来点轻松的。');
   assert.ok(rest.startsWith('给你放一首'));
+});
+
+test('开头的时段语气提示每段都带，句内标记按白名单洗、切开的成对标记补齐', async () => {
+  const { fetchFn, log } = fakeFish({ tts: async () => ({ ok: true, status: 200, body: bodyOf(fishMp3(40)) }) });
+  const text = '[soft, slow] <whisper>夜深了，这首慢慢听。</whisper>[giggle]明天见，<slow>早点睡</slow>。';
+  for await (const _chunk of stream(text, { cfg: { ...cfg, style: '[fallback]' }, fetchFn, probe: open })) { /* 收完 */ }
+  assert.deepEqual(log.map((body) => body.text), [
+    '[soft, slow] <whisper>夜深了，这首慢慢听</whisper>。',
+    '[soft, slow] 明天见，早点睡。',
+  ]);
+});
+
+test('网关支持流式：整段一次要，带 stream_audio，边收边吐、去掉开头的 Xing', async () => {
+  const mp3 = fishMp3(20);
+  const { fetchFn, log } = fakeFish({
+    health: async () => ({ ok: true, json: async () => ({ status: 'ok', stream_audio: true }) }),
+    tts: async () => ({ ok: true, status: 200, body: new ReadableStream({
+      start(controller) {
+        for (let at = 0; at < mp3.length; at += 1000) controller.enqueue(new Uint8Array(mp3.subarray(at, at + 1000)));
+        controller.close();
+      },
+    }) }),
+  });
+  const chunks = [];
+  for await (const chunk of stream('[warm, soft] 晚上好，这里是 Claudio。今晚有点凉，给你放一首老歌吧。', { cfg: { ...cfg, stream: true }, fetchFn, probe: open })) chunks.push(chunk);
+  assert.equal(log.length, 1);
+  assert.deepEqual(log[0], {
+    text: '[warm, soft] 晚上好，这里是 Claudio。今晚有点凉，给你放一首老歌吧。', reference_id: 'claudio', format: 'mp3', stream_audio: true,
+  });
+  assert.ok(chunks.length > 1, '开头攒够 2 KB 就先吐');
+  assert.deepEqual(Buffer.concat(chunks), frames(20));
+  // 关掉流式（PC5090_STREAM=0）退回逐段
+  log.length = 0;
+  for await (const _chunk of stream('晚上好，这里是 Claudio。今晚有点凉，给你放一首老歌吧。', { cfg: { ...cfg, stream: false }, fetchFn, probe: open })) { /* 收完 */ }
+  assert.equal(log.length, 2);
+  assert.equal(log[0].stream_audio, undefined);
 });

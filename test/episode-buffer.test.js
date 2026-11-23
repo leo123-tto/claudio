@@ -186,3 +186,17 @@ test('reviseSays：语音本来就跳过的（5090 不在）保持跳过，不�
   assert.equal(spoken.length, before);
   assert.ok(service.held().every((e) => e.voice.status === 'skipped' && e.say === '很长的一段话。'));
 });
+test('口播频率：领取时问一次 speaks；不开口就停掉语音、交出去掉口播的副本，原件的 say 不动',async(t)=>{
+  let count=0,asked=0;const voices=[],events=[];
+  const service=createEpisodeBuffer({capacity:1,build:async()=>ep(String(++count)),emit:e=>events.push(e),speaks:()=>{asked++;return false;},synthesize:()=>new Promise((resolve)=>voices.push(resolve))});
+  t.after(()=>service.dispose());service.ensure();await settle();
+  const muted=await service.claim('one');
+  assert.equal(muted.say,'');assert.equal(muted.voice.status,'skipped');assert.equal(muted.queue.every(item=>item.type==='song'),true);
+  assert.equal((await service.claim('one')).say,'');assert.equal(asked,1); // 只问一次
+  assert.equal(service.held().find(e=>e.id===muted.id).say,'歇一会儿');
+  voices[0]({url:'/tts/late.mp3'});await settle();
+  assert.equal(events.some(e=>e.kind==='voiceReady'&&e.episodeId===muted.id),false);
+  assert.equal(service.getVoice(muted.id).status,'skipped');
+  const spoken=createEpisodeBuffer({capacity:1,build:async()=>ep('s'),speaks:()=>true});t.after(()=>spoken.dispose());spoken.ensure();await settle();
+  assert.equal((await spoken.claim('s')).say,'歇一会儿');
+});

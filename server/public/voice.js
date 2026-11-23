@@ -1,25 +1,52 @@
-// 公用版的短口播：一句、不超过 25 字，排在老板之后。
+// 公用版的短口播：念出来的纯文字不超过 100 字（不算演出标记和语气提示），整句取，排在老板之后。
 //
 // 合成交给老板实例 8099 名额服务的 POST /tts（server/ncm-shared.js）：老板那边语音用 5090、通道就绪、自己没在
 // 合成 / 排队时才念，否则回 409，这一句就不念了——不重试、不排队，歌照放。公用版自己同一时间也只要 1 句。
 // 念好的 mp3 按 id 记 10 分钟，网页来取（/api/voice/:id）；只有同一个人能取。
+// 发给 TTS 的是 ttsText()：时段语气的导演提示 + 清洗过的演出标记；页面和记录用的是去掉标记的干净文字。
+//
+// 两种口播：
+//   request       点歌回话、每批第一首的模板报幕：马上合成，用户要的口播压过后台报幕。
+//   requestIntro  后台报幕：id 先给出去，稿子由大脑在空闲时现写（不扣朋友的次数），写不出来就用模板句，
+//                 念之前等前一句念完；用户那边的口播一来就让路。写好的字随语音一起交给网页（见 get）。
 import crypto from 'node:crypto';
+import { sanitizeTags, stripTags, plainText } from '../tts/tags.js';
+import { ttsText } from '../tone.js';
 
-export const VOICE_MAX = 25;
+export const VOICE_MAX = 100;
 const TTL = 10 * 60_000;
+const MAX_INTRO_PENDING = 6; // 同时在写的后台报幕超过这个数，多出来的直接用模板句
 
 const len = (text) => [...String(text || '')].length;
+const plainLen = (text) => len(plainText(text));
 
-// 太长就取第一句；第一句也超就不念
-export function voiceText(text) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!clean) return '';
-  if (len(clean) <= VOICE_MAX) return clean;
-  const first = clean.match(/^[^。！？!?]+[。！？!?]/)?.[0] || '';
-  return first && len(first) <= VOICE_MAX ? first : '';
+// 按句切，句末标点留在句尾；最后一截没标点也算一句
+export function sentences(text) {
+  return String(text || '').match(/[^。！？!?]*[。！？!?]+|[^。！？!?]+$/g) || [];
 }
 
-// 自动接着放时的报幕（不叫大脑）
+// 整句取：放得下就整段；放不下就留前面放得下的整句；第一句都放不下返回 ''（只出字、不念）。
+export function wholeSentences(text, max, measure = len) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean || measure(clean) <= max) return clean;
+  let out = '';
+  for (const sentence of sentences(clean)) {
+    if (measure(out + sentence) > max) break;
+    out += sentence;
+  }
+  return out.trim();
+}
+
+// 给 5090 念的整串：纯文字 ≤ VOICE_MAX（整句取，切完标记再清洗一遍保证成对）；不给 tone 就只返回清洗后的稿子
+export function voiceText(text, tone = null) {
+  const opts = tone ? { maxTags: tone.maxTags, maxPairs: tone.maxPairs, points: tone.points, pairs: tone.pairs } : {};
+  const body = sanitizeTags(String(text || '').replace(/\s+/g, ' ').trim(), opts);
+  if (!body) return '';
+  const cut = sanitizeTags(wholeSentences(body, VOICE_MAX, plainLen), opts);
+  return tone ? ttsText(cut, tone) : cut;
+}
+
+// 自动接着放时的报幕（不叫大脑；大脑写的报幕不可用时的退路）
 export function introLine(song, rand = Math.random) {
   const t = String(song?.title || '').replace(/\s*[(（].*?[)）]\s*/g, '').trim();
   const a = String(song?.artist || '').split(' / ')[0];
@@ -29,22 +56,34 @@ export function introLine(song, rand = Math.random) {
   return voiceText(pick) || voiceText(`接下来，《${t}》。`);
 }
 
-export function createVoice({ ttsUrl = '', fetchFn = fetch, timeout = 12_000, now = () => Date.now(), log = () => {} } = {}) {
-  const lines = new Map(); // id -> { memberId, promise, until }
-  let busy = false;
+export function createVoice({
+  ttsUrl = '',
+  fetchFn = fetch,
+  timeout = 25_000,
+  slotWaitMs = 20_000,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  log = () => {},
+} = {}) {
+  const lines = new Map(); // id -> { memberId, promise, until, say }
+  let inflight = null; // 正在合成的一句：{ bg, abort }
+  let introPending = 0;
 
   function sweep() {
     const t = now();
     for (const [id, v] of lines) if (v.until <= t) lines.delete(id);
   }
 
-  async function synth(text) {
+  async function synth(text, bg) {
+    const ctrl = new AbortController();
+    const job = { bg, abort: () => ctrl.abort() };
+    inflight = job;
     try {
       const res = await fetchFn(new URL('/tts', ttsUrl), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ text }),
-        signal: AbortSignal.timeout(timeout),
+        signal: AbortSignal.any([AbortSignal.timeout(timeout), ctrl.signal]),
       });
       if (res.status !== 200) return null;
       const audio = Buffer.from(await res.arrayBuffer());
@@ -52,28 +91,63 @@ export function createVoice({ ttsUrl = '', fetchFn = fetch, timeout = 12_000, no
     } catch {
       return null;
     } finally {
-      busy = false;
+      if (inflight === job) inflight = null;
     }
   }
 
-  // 返回口播 id；不念（没配、太长、正在念别人的）返回 ''
-  function request(memberId, text) {
-    const say = voiceText(text);
-    if (!ttsUrl || !say || busy) return '';
-    busy = true;
+  const newId = () => crypto.randomBytes(9).toString('base64url');
+
+  // 返回口播 id；不念（没配、太长、正在念别人的）返回 ''。后台报幕正在合成就把它让掉。
+  function request(memberId, text, { tone = null } = {}) {
+    const say = voiceText(text, tone);
+    if (!ttsUrl || !say) return '';
+    if (inflight && !inflight.bg) return '';
+    inflight?.abort();
     sweep();
-    const id = crypto.randomBytes(9).toString('base64url');
-    const promise = synth(say);
+    const id = newId();
+    const promise = synth(say, false);
     promise.then((audio) => { if (!audio) log('voice-skip', memberId); });
-    lines.set(id, { memberId, promise, until: now() + TTL });
+    lines.set(id, { memberId, promise, until: now() + TTL, say: '' });
     return id;
   }
 
+  // 后台报幕：produce() 返回大脑写的带标记的稿子（空 = 写不出来），fallback 是模板句。没配语音返回 ''。
+  function requestIntro(memberId, { produce, fallback = '', tone = null } = {}) {
+    if (!ttsUrl) return '';
+    sweep();
+    const id = newId();
+    const entry = { memberId, until: now() + TTL, say: '', promise: null };
+    introPending += 1;
+    entry.promise = (async () => {
+      try {
+        let tagged = '';
+        if (produce && introPending <= MAX_INTRO_PENDING) {
+          try { tagged = (await produce()) || ''; } catch { tagged = ''; }
+        }
+        let say = voiceText(tagged, tone);
+        if (!say) { tagged = fallback; say = voiceText(fallback, tone); }
+        entry.say = stripTags(tagged);
+        if (!say) return null;
+        // 前一句（含用户那边的）念完再念；等不到就只出字
+        for (let waited = 0; inflight && waited < slotWaitMs; waited += 500) await sleep(500);
+        if (inflight) return null;
+        return await synth(say, true);
+      } finally {
+        introPending -= 1;
+      }
+    })();
+    entry.promise.then((audio) => { if (!audio) log('voice-skip', memberId); });
+    lines.set(id, entry);
+    return id;
+  }
+
+  // 等这句念好：{ audio, say }，audio 为 null 表示不念；say 只有后台报幕才有（网页拿它显示）。不是本人的 / 过期返回 null。
   async function get(memberId, id) {
     const line = lines.get(String(id));
     if (!line || line.memberId !== memberId || line.until <= now()) return null;
-    return line.promise;
+    const audio = await line.promise;
+    return { audio, say: line.say };
   }
 
-  return { request, get, lines };
+  return { request, requestIntro, get, lines };
 }

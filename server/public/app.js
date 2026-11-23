@@ -3,16 +3,21 @@
 import express from 'express';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { BrainBusyError } from './brain.js';
+import { BrainBusyError, publicTone } from './brain.js';
 import { NcmBusyError, toHttps } from './ncm-public.js';
 import { HubError } from './hub-client.js';
 import { createMediaProxy } from './media.js';
 import { createMixer, shuffle, songKey } from './mix.js';
 import { createVoice, introLine } from './voice.js';
 import { oneSentence } from '../drive.js';
+import { readToneExtension } from '../tone.js';
+import { TALK_LEVELS, applyTalk, createTalkTracker, effectiveTalk, hourKeyOf, speakReasons, talkAck, talkFromText } from '../talk.js';
 import { appVersion } from '../version.js';
 
 const COOKIE = 'dj_dev';
+const BEIJING = 8 * 3600_000;
+// 账号面板里的设置：清空记忆时留着（不算记忆）
+const SETTING_KEYS = ['quality', 'adult', 'talk'];
 
 // 音质：绑了网易云且是会员默认要无损（只到 CD 级，见 ncm-public.js 的 songUrl），其余要 exhigh（320k，没绑定的免费歌也能拿到）；
 // 账号面板选了「流畅」，或这次打开网页卡顿自动降档（smooth，网页每次请求带上）也要 320k。没有这档网易云自己降
@@ -130,6 +135,8 @@ export function createPublicApp({
   maxListeners = 8,
   freeChartId = '3778678',
   ttsUrl = '',
+  toneExtension = readToneExtension, // 本容器数据目录里的本地语气扩展（没有文件就没有这个开关）；测试可以换掉
+  voiceOptions = {},
   fetchFn = fetch,
   log = () => {},
   now = () => Date.now(),
@@ -143,7 +150,17 @@ export function createPublicApp({
   const qrKeys = new Map(); // memberId -> { key, at }
   const media = createMediaProxy({ ncm, members, qualityFor, fetchFn, now, log });
   const mixer = createMixer({ ncm, brain, members, qualityFor, log, now });
-  const voice = createVoice({ ttsUrl, fetchFn, now, log });
+  const voice = createVoice({ ttsUrl, fetchFn, now, log, ...voiceOptions });
+  const talkers = new Map(); // memberId -> 上一次开口的记录（只在内存里，每位朋友各一份）
+  const talkerOf = (id) => {
+    if (!talkers.has(id)) {
+      if (talkers.size > 500) talkers.delete(talkers.keys().next().value);
+      talkers.set(id, createTalkTracker());
+    }
+    return talkers.get(id);
+  };
+  // 这位朋友自己打开了本地语气扩展才有；驾驶模式永远不用
+  const adultExtension = (mem, drive = false) => (!drive && mem?.adult === true ? toneExtension() : null);
 
   app.use((req, res, next) => {
     res.set({
@@ -244,6 +261,7 @@ export function createPublicApp({
 
   const memberView = (m) => {
     const mem = members.memory(m.id);
+    const extension = toneExtension();
     return {
       name: m.name,
       remaining: m.remaining,
@@ -258,6 +276,9 @@ export function createPublicApp({
       vip: Boolean(mem.account?.vip),
       quality: mem.quality === 'smooth' ? 'smooth' : 'lossless',
       prefs: mem.prefs,
+      adult: Boolean(extension) && mem.adult === true,
+      adultLabel: extension?.label || null,
+      talk: effectiveTalk(mem.talk, now()),
     };
   };
 
@@ -381,6 +402,44 @@ export function createPublicApp({
     return { songs, notice };
   }
 
+  const beijingHour = () => new Date(now() + 8 * 3600_000).getUTCHours();
+
+  // 自动接着放的报幕：先给每首一句模板（马上能念、也是大脑写不出来时的退路），再让大脑在后台换成像样的。
+  // 没人在等的才让大脑写：网页说 ahead（正在放着一首，这批是提前要的）时整批都写；否则第一首（用户在等）只用模板，
+  // 后面的写。大脑只在空闲时写、不扣朋友的次数（见 brain.askIdle）；驾驶模式只给第一首报一句模板。
+  // 口播频率（server/talk.js）：安静 / 几乎不说时，这首不报幕——没有 say 也没有 voice，网页直接放歌。
+  function introduce(m, songs, { ahead = false, drive = false } = {}) {
+    const at = now();
+    const tone = publicTone({ at, drive });
+    const level = effectiveTalk(members.memory(m.id).talk, at);
+    const talker = talkerOf(m.id);
+    const stamp = { at, tier: publicTone({ at }).key, hourKey: hourKeyOf(at, BEIJING) };
+    songs.forEach((song, i) => {
+      const fallback = introLine(song);
+      if (drive && i > 0) return;
+      const why = speakReasons(level, talker.context(stamp));
+      if (!why.length) { talker.markPlayed(at); return; }
+      talker.markSpoken(stamp);
+      song.say = fallback;
+      if (drive || (i === 0 && !ahead)) {
+        song.voice = voice.request(m.id, fallback, { tone });
+        return;
+      }
+      const produce = async () => {
+        if (typeof brain.askIdle !== 'function') return '';
+        try {
+          const memory = members.memory(m.id);
+          const out = await brain.askIdle({ memory, bound: true, hour: beijingHour(), tone, intro: song, name: m.name, extension: adultExtension(memory, drive) }, { waitMs: 30_000 });
+          return out?.sayTagged || '';
+        } catch (error) {
+          log('intro-skip', m.id, error.code || error.name);
+          return '';
+        }
+      };
+      song.voice = voice.requestIntro(m.id, { produce, fallback, tone });
+    });
+  }
+
   app.post('/api/chat', auth, async (req, res) => {
     const m = req.member;
     const text = String(req.body?.text || '').trim().slice(0, 200);
@@ -388,6 +447,13 @@ export function createPublicApp({
     const drive = req.body?.drive === true; // 驾驶模式：DJ 只说一句
     const smooth = req.body?.smooth === true; // 这次打开网页卡过，降到 320k
     const cookie = members.getCookie(m.id);
+    // 「少说点」「今天别打扰我」这类话：记下口播频率，回一句确认；不打大脑、不扣次数、不记进对话
+    const talkChange = auto ? null : talkFromText(text);
+    if (talkChange) {
+      const mem = members.memory(m.id);
+      members.saveMemory(m.id, { ...mem, talk: applyTalk(mem.talk, talkChange, { now: now(), tzOffsetMs: BEIJING }) });
+      return res.json({ say: talkAck(talkChange), songs: [], notice: '', intent: 'chat', remaining: null, talk: talkChange.level });
+    }
     // 盒子出口匿名搜索一律 405，会连累主实例：没有默认音源（没配 NCM_SHARED_URL）时，没绑定的不开放点歌，也不扣次数
     if (!auto && !cookie && !ncm.borrowsOwner) {
       return res.json({ say: '', songs: [], notice: '绑定网易云后才能点歌（右上角菜单里扫码）。不绑定也能按播放，听榜单里的免费歌。', intent: 'chat', remaining: null, needBind: true });
@@ -401,18 +467,14 @@ export function createPublicApp({
         // 选歌要好几秒，期间「开始放」可能记了最近听过：只合并这里改过的字段，别拿旧快照整份覆盖
         const { taste, deck, rec, simi, fresh, freshTried } = memory;
         members.saveMemory(m.id, { ...members.memory(m.id), taste, deck, rec, simi, fresh, freshTried });
-        // 每批第一首报个幕（模板，不叫大脑）；老板那边不闲就只出字
-        const first = picked.songs[0];
-        if (first) {
-          first.say = introLine(first);
-          first.voice = voice.request(m.id, first.say);
-        }
+        introduce(m, picked.songs, { ahead: req.body?.ahead === true, drive });
         return res.json({ say: '', songs: withLiked(memory, picked.songs), notice: picked.notice, intent: 'recommend', remaining: quota.remaining, degraded: false });
       }
+      const tone = publicTone({ at: now(), drive });
       let reply;
       let degraded = false;
       try {
-        reply = await brain.ask({ text, auto, memory, bound: true, drive, hour: new Date(now() + 8 * 3600_000).getUTCHours() });
+        reply = await brain.ask({ text, auto, memory, bound: true, drive, hour: beijingHour(), tone, name: m.name, extension: adultExtension(memory, drive) });
       } catch (error) {
         if (error?.queueFull) throw error;
         degraded = true;
@@ -430,7 +492,9 @@ export function createPublicApp({
       const prefs = [...(memory.prefs || [])];
       for (const p of reply.memoryCandidates) if (!prefs.includes(p)) prefs.push(p);
       members.saveMemory(m.id, { ...members.memory(m.id), turns, prefs });
-      const voiceId = say && !degraded ? voice.request(m.id, say) : '';
+      // 念的是带演出标记的原稿；驾驶模式一句、不带标记
+      const voiceId = say && !degraded ? voice.request(m.id, drive ? say : (reply.sayTagged || say), { tone }) : '';
+      if (say) talkerOf(m.id).markSpoken({ at: now(), tier: publicTone({ at: now() }).key, hourKey: hourKeyOf(now(), BEIJING) });
       res.json({ say, voice: voiceId, songs: withLiked(memory, picked.songs), notice: picked.notice, intent: reply.intent, remaining: quota.remaining, degraded });
     } catch (error) { sendError(res, error); }
   });
@@ -499,9 +563,12 @@ export function createPublicApp({
 
   // 口播（见 voice.js）：念好了给 mp3，不念（老板那边不闲 / 失败 / 过期）回 204，网页直接放歌
   app.get('/api/voice/:id', auth, async (req, res) => {
-    const audio = await voice.get(req.member.id, req.params.id);
-    if (!audio) return res.status(204).end();
-    res.set({ 'Content-Type': 'audio/mpeg', 'Cache-Control': 'private, no-store' }).send(audio);
+    const line = await voice.get(req.member.id, req.params.id);
+    if (!line) return res.status(204).end();
+    // 后台报幕的字是现写的，随语音（或没语音时单独）交给网页显示
+    if (line.say) res.set('X-Say', encodeURIComponent(line.say));
+    if (!line.audio) return res.status(204).end();
+    res.set({ 'Content-Type': 'audio/mpeg', 'Cache-Control': 'private, no-store' }).send(line.audio);
   });
 
   // 音频一律经同源代理（见 media.js）
@@ -549,9 +616,9 @@ export function createPublicApp({
   });
 
   app.post('/api/memory/clear', auth, (req, res) => {
-    const { quality } = members.memory(req.member.id);
+    const kept = Object.fromEntries(SETTING_KEYS.map((key) => [key, members.memory(req.member.id)[key]]).filter(([, value]) => value));
     members.clearMemory(req.member.id);
-    if (quality) members.saveMemory(req.member.id, { ...members.memory(req.member.id), quality }); // 音质是设置，不算记忆
+    if (Object.keys(kept).length) members.saveMemory(req.member.id, { ...members.memory(req.member.id), ...kept }); // 音质、本地语气扩展、口播频率是设置，不算记忆
     res.json({ ok: true });
   });
 
@@ -560,6 +627,22 @@ export function createPublicApp({
     const quality = req.body?.quality === 'smooth' ? 'smooth' : 'lossless';
     members.saveMemory(req.member.id, { ...members.memory(req.member.id), quality });
     res.json({ ok: true, quality });
+  });
+
+  // 账号面板：本地语气扩展开关（默认关；本容器数据目录里有 tone-extension.md 才有这个开关）和口播频率。都记在这个人自己的记忆里
+  app.post('/api/adult', auth, (req, res) => {
+    if (!toneExtension()) return res.status(404).json({ error: 'unavailable' });
+    const adult = req.body?.on === true;
+    members.saveMemory(req.member.id, { ...members.memory(req.member.id), adult });
+    res.json({ ok: true, adult });
+  });
+
+  app.post('/api/talk', auth, (req, res) => {
+    const level = String(req.body?.level || '');
+    if (!TALK_LEVELS.includes(level)) return res.status(400).json({ error: 'invalid' });
+    const mem = members.memory(req.member.id);
+    members.saveMemory(req.member.id, { ...mem, talk: applyTalk(mem.talk, { level, today: false }) });
+    res.json({ ok: true, talk: level });
   });
 
   // ---- 页面 ----

@@ -9,6 +9,7 @@ export function createEpisodeBuffer({
   capacity = 2, build, refresh = async (ep) => ep, commit = () => {},
   synthesize, emit = () => {}, hasClients = () => false, now = Date.now,
   enabled = () => true, offline = () => false, changed = () => {}, listening = () => true,
+  speaks = () => true, // 口播频率：领取时问一次这一期说不说（server/talk.js）
   setTimer = setTimeout, clearTimer = clearTimeout,
 } = {}) {
   capacity = Math.max(1, Number(capacity) || 2);
@@ -36,6 +37,16 @@ export function createEpisodeBuffer({
     ep.queue = ep.queue.filter((item) => item.type !== 'tts');
     voiceJobs.get(ep.id)?.abort();
   }
+  // 领取时定这一期开不开口，只定一次（同一个领取编号重复领取要拿到同样的结果）。
+  // 不开口：停掉这期的语音（连在合成的也停，免得 voiceReady 又把口播塞回去），交出去的是去掉口播的副本；
+  // 备好的原件的 say 不动（对话记录、避重复靠它），只标 muted。
+  function deliver(ep) {
+    stale(ep);
+    if (ep.muted === undefined) ep.muted = Boolean(ep.say) && !speaks(ep);
+    if (!ep.muted) return ep;
+    skipVoice(ep);
+    return { ...ep, say: '', sayTts: '', voice: { status: 'skipped' }, queue: ep.queue.filter((item) => item.type !== 'tts') };
+  }
   function expire() {
     for (const [id, claim] of claims) {
       if (now() - claim.at >= CLAIM_TTL) release(id);
@@ -62,7 +73,8 @@ export function createEpisodeBuffer({
     const controller = new AbortController();
     voiceJobs.set(ep.id, controller);
     try {
-      const audio = await synthesize(ep.say, { signal: controller.signal });
+      // sayTts：带时段语气和演出标记、只给语音念的版本（server/tone.js）；页面和记录用 say
+      const audio = await synthesize(ep.sayTts || ep.say, { signal: controller.signal });
       if (controller.signal.aborted || !valid(ep) || ep.voice.status !== 'pending') return;
       stale(ep);
       if (ep.voice.status !== 'pending') return;
@@ -175,16 +187,18 @@ export function createEpisodeBuffer({
   }
   // 驾驶模式开关变了：备好的节目照常放，只改口播（改短后重新合成；来不及合成时开播会跳过口播）。
   // 不作废节目，免得一进驾驶模式按「下一首」就得等现场重新生成。正在放的不动。
-  function reviseSays(rewrite) {
+  // voiceText：改短后的口播怎么念（驾驶档的语气提示）；不给就念干净的 say。
+  function reviseSays(rewrite, voiceText = null) {
     const pending = [...buffer, ...[...claims.values()].filter((c) => !c.invalid).map((c) => c.episode)];
     let revised = 0;
     for (const ep of pending) {
-      if (!ep?.say || ep === current) continue;
+      if (!ep?.say || ep.muted || ep === current) continue;
       const say = String(rewrite(ep.say) || '').trim();
       if (!say || say === ep.say) continue;
       voiceJobs.get(ep.id)?.abort();
       voiceJobs.delete(ep.id);
       ep.say = say;
+      ep.sayTts = voiceText ? voiceText(say) : say;
       ep.queue = ep.queue.filter((item) => item.type !== 'tts');
       ep.voice = { status: ep.voice?.status === 'skipped' ? 'skipped' : 'pending' };
       ep.voiceFailures = 0;
@@ -202,12 +216,12 @@ export function createEpisodeBuffer({
     if (old) {
       if (old.invalid) throw new Error('节目已更新，请重新领取');
       await old.ready;
-      return stale(old.episode);
+      return deliver(old.episode);
     }
     const prior = started.get(claimId);
     if (prior) {
       if (prior.episode.epoch !== epoch || now() - prior.at >= CLAIM_TTL) throw new Error('节目已失效，请重新领取');
-      return stale(prior.episode);
+      return deliver(prior.episode);
     }
     const ep = buffer.shift();
     if (!ep) {
@@ -226,7 +240,7 @@ export function createEpisodeBuffer({
     notifyChange();
     ensure();
     await entry.ready;
-    return stale(ep);
+    return deliver(ep);
   }
   function release(claimId) {
     const entry = claims.get(claimId);

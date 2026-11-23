@@ -6,6 +6,7 @@ import { getSettings } from '../settings.js';
 import * as fish from './fish.js';
 import * as pc5090 from './pc5090.js';
 import { abortReason, throwIfAborted, withAbort } from './abort.js';
+import { textForProvider } from './tags.js';
 
 // 念法变了（整段 / 逐句、语气提示）缓存要跟着换，不然会放出旧念法的录音
 function pc5090Variant() {
@@ -57,7 +58,7 @@ export function createLiveTtsManager({
 
   function prepare(text, { signal, onError, onFirstByte } = {}) {
     throwIfAborted(signal);
-    const clean = String(text || '').trim();
+    const clean = textForProvider(text, getProvider());
     if (!clean) throw new Error('tts: 空文本');
     const hash = hashText(clean);
     const file = path.join(cacheDir, `${hash}.mp3`);

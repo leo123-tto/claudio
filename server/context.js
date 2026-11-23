@@ -27,6 +27,8 @@ import { banStore } from './bans.js';
 import { factStore } from './song-meta.js';
 import { currentScene, sceneText } from './scene.js';
 import { DRIVE_PROMPT } from './drive.js';
+import { readToneExtension, toneFor, toneKey, tonePrompt } from './tone.js';
+import { loadPersona, personaMode, personaNow } from './persona.js';
 
 function readSafe(file) {
   try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; }
@@ -161,7 +163,7 @@ function profileText(profile) {
   ].filter(Boolean).join('\n') || '（行为画像刚开始积累，先参考口味档案）';
 }
 
-export function buildPromptBundle({ userInput = '', mood = '', sleep = null, nowPlaying = null, briefSay = false, drive = false, excludeSongs = [], recentSays = [], now = new Date(), scene = currentScene(now) } = {}) {
+export function buildPromptBundle({ userInput = '', mood = '', sleep = null, nowPlaying = null, briefSay = false, drive = false, excludeSongs = [], recentSays = [], now = new Date(), scene = currentScene(now), toneExtension = false, singleSong = false } = {}) {
   const settings = getSettings();
   const favoriteSongs = readFavorites();
   const actualRecent = recentListenedSongs(50);
@@ -184,6 +186,10 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
   const isExplicitSongRequest = explicitSongRequest(userInput);
   const hasPositiveStyle = styleConstraints([userInput, mood].filter(Boolean).join(' ')).some(Array.isArray);
 
+  const tone = toneFor(toneKey({ now, scene, drive }));
+  const persona = loadPersona();
+  // 睡前最后一段（定时剩 5 分钟内，或听众说要睡了）用每晚的结束语收尾
+  const lastOfNight = (sleep?.remainingMin != null && sleep.remainingMin <= 5) || scene.key === 'sleep';
   const weather = summaryLine();
   const sceneHistory = sceneMemory(readEvents(), scene);
   const environment = [
@@ -210,7 +216,9 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
 
   const outputContract = `JSON 字段顺序必须是 say、intent、action、actionValue、play、reason、memoryCandidates：
 {"say":"中文口播","intent":"chat","action":"none","actionValue":0,"play":[],"reason":"意图与选择依据","memoryCandidates":[]}
-- say：必须第一个生成。聊天和推荐默认用中文口语 2–3 句、70 到 110 字，多讲一句此刻的感觉或为什么接这首；本次任务若要求简短口播则按任务长度。不要清单式念歌名，也不要长篇。控制确认就一句，20 字内。不使用固定开场套话。
+- say：必须第一个生成。聊天和推荐用中文口语 40 到 80 字（不算演出标记），少于 40 字就太干了；本次任务若要求简短口播则按任务长度。控制确认就一句，20 字内。
+  除了把歌带出来，再给一两句有内容的：为什么此刻放它（时段、工作日还是周末、听众的口味或刚说的话），或一点你确实知道的歌曲 / 歌手背景，偶尔轻轻聊一句。说法每次都换，不用固定句式和开场套话，不清单式念歌名。
+  不引用歌词。背景没把握就不说，不编年份、奖项、轶事。数字写阿拉伯数字，歌名用《》，句末用全角句号、问号或感叹号，每句不超过 40 字。
 - intent：只能是 chat / recommend / control。先判断听众是在陪伴聊天、想换音乐，还是要求操作播放器。
 - action：control 时只能是 pause / resume / next / previous / stop / favorite / dislike / volume_up / volume_down / volume_set；其他意图必须是 none。
 - actionValue：仅 volume_set 时填 0–100，其余填 0。
@@ -255,7 +263,7 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
   // 所以点歌不删中间段落；最近听过也全带（少带会让大脑挑到被滤掉的歌、选歌落空）。点歌只在尾部加一句要短。
   const chat = Boolean(userInput);
   const prompt = [
-    '你是 Claudio，听众的私人电台 DJ。像懂 ta 的老朋友，中文、温柔，把话说完整一点，不油腻、不套话。',
+    persona.body,
     '## 输出契约（严格只输出 JSON）\n' + outputContract,
     '## 听众口味档案\n' + (taste || '（尚未填写）'),
     playlists ? '## 听众手工歌单（理解场景，不要把它当默认点歌单）\n' + playlists : '',
@@ -275,9 +283,14 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
     brief.recentUserMessages.length ? '## 最近听众自己说过的话\n' + brief.recentUserMessages.map((line) => `- ${line}`).join('\n') : '',
     '## 本次最高优先级任务\n' + (userInput ? chatRules : automaticRules),
     userInput && hasPositiveStyle ? styleRules : '',
-    chat ? '本次是听众当面说话，要快：say 用 1–2 句、40 到 70 字；reason 15 字内；memoryCandidates 只在听众这次明确说了喜好时写，否则 []。' : '',
+    chat ? '本次是听众当面说话，要快：say 用 2 句、40 到 70 字（不算标记），别只回一句「好，放某某」；reason 15 字内；memoryCandidates 只在听众这次明确说了喜好时写，否则 []。' : '',
     briefSay ? '本次简短口播：推荐或聊天只说一句，30到45个字，不要第二句；控制确认仍在20字内。' : '',
+    // 话多档：每首歌前都说，一段只放一首（覆盖上面「两首」「前两首」的说法）
+    singleSong ? '本段只放一首歌：程序只播放 play 的第一首，其余只作不可播时的备选；say 只介绍这一首，不提第二首。把你最想放的那首排第一。' : '',
     drive ? DRIVE_PROMPT : '',
+    // 人格的哪一面、语气档按时段变，放在后面（不影响前面的缓存前缀）
+    personaNow(personaMode({ toneKey: tone.key, now, text: [userInput, mood].join(' ') }), { closing: lastOfNight && !drive ? persona.closing : '' }),
+    tonePrompt(tone, { extension: toneExtension && !drive ? readToneExtension() : null, now }),
     sleep?.remainingMin != null ? `## 睡前模式\n约 ${sleep.remainingMin} 分钟后睡，歌曲能量逐步下降；剩 5 分钟内温柔收尾。` : '',
     '## 此刻场景（选歌和口播长度按这个来）\n' + sceneText(scene),
     sceneHistory,
@@ -290,6 +303,7 @@ export function buildPromptBundle({ userInput = '', mood = '', sleep = null, now
 
   return {
     prompt,
+    tone,
     recommendation: {
       favoriteSongs,
       recentSongs,

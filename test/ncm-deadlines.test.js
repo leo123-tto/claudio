@@ -496,7 +496,7 @@ test('要名额的实例：等服务放行再搜；服务说冷却就不搜；�
   } finally { server.close(); config.ncm.sharedUrl = ''; ncm.resetRateLimitsForTests(); }
 });
 
-test('名额服务 /tts：老板闲着回 mp3，不闲回 409，超 25 字回 400，没接 tts 回 404', async () => {
+test('名额服务 /tts：老板闲着回 mp3，不闲回 409，纯文字超 100 字或整串超 400 字回 400，没接 tts 回 404', async () => {
   const { startSlotServer } = await import('../server/ncm-shared.js');
   const said = [];
   const server = startSlotServer('127.0.0.1:0', {
@@ -512,8 +512,14 @@ test('名额服务 /tts：老板闲着回 mp3，不闲回 409，超 25 字回 40
     assert.equal(ok.headers.get('content-type'), 'audio/mpeg');
     assert.equal(Buffer.from(await ok.arrayBuffer()).toString(), 'mp3');
     assert.equal((await post(server, { text: '忙' })).status, 409);
-    assert.equal((await post(server, { text: '字'.repeat(26) })).status, 400);
+    assert.equal((await post(server, { text: '字'.repeat(101) })).status, 400);
+    // 带语气提示和标记的整串：纯文字 ≤ 100 字就放行（提示和标记不算字数），整串超 400 字不放行
+    const style = '[warm, soft late-night radio host, relaxed and gentle, unhurried]';
+    assert.equal((await post(server, { text: `${style} <soft>${'字'.repeat(100)}</soft>` })).status, 200);
+    assert.equal((await post(server, { text: `${style} ${'字'.repeat(101)}` })).status, 400);
+    assert.equal((await post(server, { text: `${style} ${'字'.repeat(100)}${'[pause]'.repeat(40)}` })).status, 400);
     assert.equal((await post(bare, { text: '晚上好' })).status, 404);
-    assert.deepEqual(said, ['晚上好', '忙']);
+    assert.equal(said.length, 3);
+    assert.deepEqual(said.slice(0, 2), ['晚上好', '忙']);
   } finally { server.close(); bare.close(); }
 });

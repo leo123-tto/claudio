@@ -3,8 +3,9 @@
 // （NCM_SHARED_URL=http://127.0.0.1:8099）。服务不在（老板实例重启）就按自己的每分钟上限照常搜。
 // 不放在 8090：那个端口经 Tailscale serve 对 tailnet 开着。
 import http from 'node:http';
+import { plainText } from './tts/tags.js';
 
-const MAX_BODY = 1024;
+const MAX_BODY = 2048;
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
 function parseAddress(value) {
@@ -14,8 +15,10 @@ function parseAddress(value) {
 }
 
 // grant(kind) → { ok } | { ok:false, retryMs } | { ok:false, coolingMs }；cool(ms) 记下别的实例碰到的 405。
-// tts(text) → mp3 Buffer | null：公用版要一句短口播（≤25 字），老板这边不闲就 null，回 409 让它跳过。
-export const GUEST_TTS_MAX = 25;
+// tts(text) → mp3 Buffer | null：公用版要一段短口播，老板这边不闲就 null，回 409 让它跳过。
+// 纯文字（去掉开头的语气提示和演出标记）≤ 100 字；整串（含提示和标记）另限 400 字。
+export const GUEST_TTS_MAX = 100;
+export const GUEST_TTS_RAW_MAX = 400;
 // guest：公用版未绑定账号时经主实例取歌（{ search, songUrl, find, lyric }，见 ncm.js 的 guest* 函数）。
 // 只搜、只取链接；老板的 cookie 不出老板实例，回给公用版的只有歌的信息和直链。
 const SONG_ID = /^(\d{1,15}|[a-z]{2,4}\d{1,20})$/;
@@ -80,7 +83,7 @@ export function startSlotServer(address, { grant, cool, tts = null, guest = null
       if (guest && req.url.startsWith('/guest/')) return handleGuest(guest, req.url, body, reply, { urlTimes });
       if (req.url === '/tts' && tts) {
         const text = String(body.text || '').trim();
-        if (!text || [...text].length > GUEST_TTS_MAX) return reply(400, { ok: false });
+        if (!text || [...text].length > GUEST_TTS_RAW_MAX || [...plainText(text)].length > GUEST_TTS_MAX) return reply(400, { ok: false });
         return Promise.resolve(tts(text)).catch(() => null).then((audio) => {
           if (!audio?.length) return reply(409, { ok: false, skip: true });
           res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length });

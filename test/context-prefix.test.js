@@ -200,19 +200,19 @@ test('G13 候选池避重同时忽略歌名和歌手大小写，仍区分不同�
 test('段落由稳定到易变排列，任务附加规则相邻，听众原话仍在最后', (t) => {
   freezeTime(t);
   const options = { userInput: '来点钢琴', briefSay: true, sleep: { remainingMin: 15 }, nowPlaying: { type: 'song', title: '正在播虚构曲', artist: '虚构歌手' } };
-  const { prompt } = buildPromptBundle(options);
+  const { prompt, tone } = buildPromptBundle(options);
   assert.deepEqual([...prompt.matchAll(/^## (.+)$/gm)].map((match) => match[1]), [
     '输出契约（严格只输出 JSON）', '听众口味档案', '听众手工歌单（理解场景，不要把它当默认点歌单）',
     '作息', '情绪规则', '持续整理的品味（他亲口说过好听或点过爱心后自动整理；手写口味档案仍以 taste.md 为准）',
     '人工可编辑的长期记忆（保留旧系统，只作稳定背景）', '禁播（自动推荐不要再选，听众可以要求恢复）',
     favoriteHeading, '结构化行为画像（分数越高越偏爱，负数表示避开）', recentHeading,
     '最近三次口播的首个分句（不得复用这些开头或意象）', '最近听众自己说过的话', '本次最高优先级任务',
-    '睡前模式', '此刻场景（选歌和口播长度按这个来）', '环境', '正在播放', '听众刚说',
+    '此刻的 Vera', `口播语气（此刻：${tone.label}）`, '睡前模式', '此刻场景（选歌和口播长度按这个来）', '环境', '正在播放', '听众刚说',
   ]);
   const task = section(prompt, '本次最高优先级任务');
   assert.ok(task.indexOf('听众刚说了话') < task.indexOf('本次有明确的正向曲风'));
   assert.ok(task.indexOf('本次有明确的正向曲风') < task.indexOf('本次简短口播'));
-  assert.ok(prompt.startsWith('你是 Claudio，听众的私人电台 DJ。'));
+  assert.ok(prompt.startsWith('你是 Vera，Claudio 电台的 DJ。'));
   assert.ok(prompt.endsWith(`## 听众刚说\n${options.userInput}`));
   const auto = buildPromptBundle({ ...options, userInput: '', mood: '安静' }).prompt;
   assert.ok(section(auto, '本次最高优先级任务').includes('这次是自动推荐，intent=recommend，action=none。\n本次有明确的正向曲风'));

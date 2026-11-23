@@ -1,3 +1,5 @@
+import { stripTags } from '../tts/tags.js';
+
 export function extractJson(text) {
   const source = String(text || '');
   const start = source.indexOf('{');
@@ -183,8 +185,11 @@ export function normalizeResult(obj = {}) {
   else if (intent === 'control') play = [];
   else { action = 'none'; actionValue = 0; }
 
+  // say 里可以有演出标记（server/tts/tags.js）：页面、记录、校正都用去掉标记的 say，sayTagged 只给语音
+  const sayTagged = clean(obj.say);
   return {
-    say: clean(obj.say),
+    say: stripTags(sayTagged),
+    sayTagged,
     intent,
     action,
     actionValue,

@@ -15,6 +15,7 @@ import * as fish from './fish.js';
 import * as pc5090 from './pc5090.js';
 import { hashTtsText } from './live.js';
 import { throwIfAborted, withAbort } from './abort.js';
+import { textForProvider } from './tags.js';
 
 const providers = { say, fish, pc5090 };
 
@@ -30,11 +31,11 @@ export function createTtsSynthesizer({
   // 并发调用共用一次合成；最后一位调用者取消时才终止上游。
   return async function synthesize(text, { signal } = {}) {
     throwIfAborted(signal);
-    const clean = (text ?? '').trim();
-    if (!clean) throw new Error('tts: 空文本');
-
     const settings = getTts();
     const providerName = settings.provider;
+    const clean = textForProvider(text, providerName);
+    if (!clean) throw new Error('tts: 空文本');
+
     const provider = providerRegistry[providerName];
     if (!provider) throw new Error(`不支持的 TTS provider：${providerName}（不会自动切换到其他语音）`);
     const ext = provider.ext ?? 'mp3';

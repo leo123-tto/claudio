@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { plainText } from '../server/tts/tags.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -316,15 +317,15 @@ test('G7 禁播保留明确点歌例外，解析后仍排除已持有歌曲', as
   assert.deepEqual(titles(await finalizeEpisode(plan([song('另一个标题')]), { recommendation })), []);
 });
 
-test('G7 零歌聊天推荐在合成前替换承诺，语音只使用诚实口播', async () => {
+test('G7 零歌聊天推荐：口播稿先合成但不放，选歌落空改成诚实口播后作废重来', async () => {
   services.ncm.resolve = async () => ({ playable: false });
   const spoken = [];
-  services.prepareLiveTts = (text) => { spoken.push(text); return { url: '/tts/fake.mp3', ready: Promise.resolve() }; };
-  services.synthesize = async (text) => { spoken.push(text); return { url: '/tts/fake.mp3' }; };
+  services.prepareLiveTts = (text, { signal } = {}) => { spoken.push({ text, signal }); return { url: `/tts/fake${spoken.length}.mp3`, ready: Promise.resolve() }; };
+  services.synthesize = async (text) => { spoken.push({ text }); return { url: '/tts/fake.mp3' }; };
   services.stream = async (_, { onText }) => {
     const raw = JSON.stringify(plan([song('不播放')]));
     onText(raw);
-    assert.deepEqual(spoken, []);
+    await tick();
     return raw;
   };
   let reply;
@@ -336,9 +337,12 @@ test('G7 零歌聊天推荐在合成前替换承诺，语音只使用诚实口�
   await tick();
   assert.equal(reply.ok, true);
   assert.equal(reply.episode.say, '这会儿没找到能放的，先接着听这首。');
-  assert.deepEqual(spoken, [reply.episode.say]);
-  assert.deepEqual(titles(reply.episode), []);
+  // 先合成的是大脑原稿（推荐要等选歌确认才放），落空后作废；最后念的是诚实口播
+  assert.equal(spoken.length, 2);
+  assert.equal(spoken[0].signal.aborted, true);
+  assert.equal(plainText(spoken[1].text), reply.episode.say);
   assert.equal(reply.episode.queue.find((item) => item.type === 'tts')?.text, reply.episode.say);
+  assert.equal(reply.episode.queue.find((item) => item.type === 'tts')?.url, '/tts/fake2.mp3');
 });
 
 test('G7 零歌自动节目不进缓冲、不合成，按失败退避重试', async () => {

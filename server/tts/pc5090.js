@@ -9,6 +9,7 @@ import net from 'node:net';
 import { config } from '../config.js';
 import { getSettings } from '../settings.js';
 import { abortReason, delay, throwIfAborted, withAbort } from './abort.js';
+import { sanitizeTags, splitLead } from './tags.js';
 
 export const ext = 'mp3';
 // 通道状态（starting / busy / ready / offline / error），界面用它显示「语音启动中」「5090 在忙」。
@@ -64,6 +65,7 @@ export function currentPc5090Config() {
     noPreempt: env.noPreempt !== false,
     whole: env.split !== true,
     style: String(env.style || '').trim(),
+    stream: env.stream !== false,
   };
 }
 
@@ -86,6 +88,10 @@ export function probePort(baseUrl, { timeout = 5000, connect = net.connect, sign
   });
 }
 
+// fishgw（2026-11-23 起）健康检查带 stream_audio：能边合成边吐 mp3。旧网关 / S2-Pro 没有，退回首句先合成。
+let gatewayStreams = false;
+export function streamsAudio() { return gatewayStreams; }
+
 // up：正常应答；busy：连上了但不回（服务单线程，给别人合成时健康检查也不回）；down：没起来或连不上。
 // 经隧道时本机端口总能连上（是 ssh 在听），档没起来表现为连接被立刻断开。
 export async function laneState(baseUrl, { fetchFn = fetch, probe = probePort, timeout = 5000, signal } = {}) {
@@ -95,6 +101,10 @@ export async function laneState(baseUrl, { fetchFn = fetch, probe = probePort, t
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   try {
     const res = await withAbort(fetchFn(`${baseUrl}/v1/health`, { signal: requestSignal }), requestSignal);
+    if (res.ok) {
+      const info = await withAbort(Promise.resolve(res.json?.()).catch(() => null), requestSignal);
+      gatewayStreams = info?.stream_audio === true;
+    }
     return res.ok ? 'up' : 'down';
   } catch (error) {
     throwIfAborted(signal);
@@ -397,8 +407,12 @@ function grant() {
   next.grant();
 }
 
+// 公用版那一句正在念时老板要念：直接停掉那一句（老板优先），不等它念完。
+let guestLine = null;
+
 function acquire(priority, signal) {
   throwIfAborted(signal);
+  if (priority === 'high') guestLine?.abort(new Error('老板要念，公用版这句让路'));
   return new Promise((resolve, reject) => {
     const entry = { grant: () => { signal?.removeEventListener('abort', abort); resolve(); } };
     const abort = () => {
@@ -529,34 +543,84 @@ async function readAll(body, signal) {
   return Buffer.concat(chunks);
 }
 
-async function requestSentence(text, { cfg, fetchFn, signal, priority }) {
+// 一段文字的请求体。开头是语气提示（只影响念法，不会被念出来）；句内标记按白名单再洗一遍，拆句时切开的成对标记在这里补齐。
+// temperature / top_p 不传，用服务端默认（老板定 Drama 3 时听的就是这组）；normalize、use_memory_cache 是 S2 的参数，Drama 3 不认，不再传。
+function ttsBody(text, { cfg, style, streamAudio = false }) {
+  const lead = style ?? cfg.style;
+  const body = sanitizeTags(text, { maxTags: 8, maxPairs: 8 });
+  return JSON.stringify({
+    text: lead ? `${lead} ${body}` : body,
+    reference_id: cfg.voice,
+    format: 'mp3',
+    ...(streamAudio ? { stream_audio: true } : {}),
+  });
+}
+
+async function postTts(text, { cfg, style, fetchFn, signal, streamAudio }) {
+  const res = await withAbort(fetchFn(`${cfg.baseUrl}/v1/tts`, {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: ttsBody(text, { cfg, style, streamAudio }),
+  }), signal);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`5090 语音 ${res.status}: ${String(detail).slice(0, 300)}`);
+  }
+  if (!res.body) throw new Error('5090 语音返回空音频流');
+  return res;
+}
+
+async function requestSentence(text, { cfg, style, fetchFn, signal, priority }) {
   await acquire(priority, signal);
   inflight += 1;
   const startedAt = Date.now();
   try {
     throwIfAborted(signal);
-    const res = await withAbort(fetchFn(`${cfg.baseUrl}/v1/tts`, {
-      method: 'POST',
-      signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: cfg.style ? `${cfg.style} ${text}` : text, // 语气提示只影响念法，不会被念出来
-        reference_id: cfg.voice,
-        format: 'mp3',
-        use_memory_cache: 'on',
-        normalize: true,
-      }),
-    }), signal);
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`5090 语音 ${res.status}: ${String(detail).slice(0, 300)}`);
-    }
-    if (!res.body) throw new Error('5090 语音返回空音频流');
+    const res = await postTts(text, { cfg, style, fetchFn, signal });
     const result = { ...mp3Audio(await readAll(res.body, signal)), ms: Date.now() - startedAt };
     throwIfAborted(signal);
     laneCooldown = null;
     setLaneStatus('ready');
     return result;
+  } finally {
+    inflight -= 1;
+    release(priority);
+  }
+}
+
+// 整段一次要、边合成边吐（fishgw stream_audio）。开头攒到 2 KB 再去掉可能有的 ID3 / Xing 头，之后原样往外送。
+async function* requestStream(text, { cfg, style, fetchFn, signal, priority }) {
+  await acquire(priority, signal);
+  inflight += 1;
+  try {
+    throwIfAborted(signal);
+    const res = await postTts(text, { cfg, style, fetchFn, signal, streamAudio: true });
+    const reader = res.body.getReader();
+    const abort = () => { Promise.resolve(reader.cancel(abortReason(signal))).catch(() => {}); };
+    signal?.addEventListener('abort', abort, { once: true });
+    let head = Buffer.alloc(0);
+    let sent = false;
+    try {
+      while (true) {
+        const { value, done } = await withAbort(reader.read(), signal);
+        throwIfAborted(signal);
+        if (done) break;
+        if (!value?.length) continue;
+        if (sent) { yield Buffer.from(value); continue; }
+        head = Buffer.concat([head, Buffer.from(value)]);
+        if (head.length < 2048) continue;
+        sent = true;
+        const { audio } = mp3Audio(head);
+        if (audio.length) yield audio;
+      }
+      if (!sent && head.length) {
+        const { audio } = mp3Audio(head);
+        if (audio.length) yield audio;
+      }
+    } finally { signal?.removeEventListener('abort', abort); reader.releaseLock(); }
+    laneCooldown = null;
+    setLaneStatus('ready');
   } finally {
     inflight -= 1;
     release(priority);
@@ -585,19 +649,26 @@ export async function* stream(text, {
   bypassCooldown = false,
 } = {}) {
   const state = await ensureLane({ fetchFn, spawnFn, probe, cfg, signal, bypassCooldown });
+  // 开头的时段语气提示（server/tone.js）每段都带；没有就用 PC5090_STYLE。
+  const { lead, body: clean } = splitLead(String(text).trim());
+  const style = lead || cfg.style;
+  // 网关能流式就整段一次要、边合成边念：首字最快，整段念法也最自然。
+  if (cfg.stream && gatewayStreams && state !== 'busy') {
+    yield* requestStream(clean, { cfg, style, fetchFn, signal, priority });
+    return;
+  }
   // 5090 在给别人合成时每句都要重新排队，这时整段一次要。
   // 整段念得自然但要等算完才开口：点歌（high）先单独合成第一句马上开口，其余整段接上；后台备节目（low）照旧整段。
-  const clean = String(text).trim();
   const halves = splitHead(clean);
   const headFirst = state !== 'busy' && cfg.whole && priority === 'high' && halves.length > 1;
-  const pieces = headFirst ? halves : state === 'busy' || cfg.whole ? [clean] : splitSentences(text);
+  const pieces = headFirst ? halves : state === 'busy' || cfg.whole ? [clean] : splitSentences(clean);
   const pending = [];
   let started = false;
   let spentMs = 0;
   let seconds = 0;
   let chars = 0;
   for (const [index, piece] of pieces.entries()) {
-    const part = await requestSentence(piece, { cfg, fetchFn, signal, priority });
+    const part = await requestSentence(piece, { cfg, style, fetchFn, signal, priority });
     if (started) {
       if (part.audio.length) yield part.audio;
       continue;
@@ -634,8 +705,14 @@ export async function synthesizeIfIdle(text, { cfg = currentPc5090Config(), fetc
   try {
     if (LOOPBACK.has(new URL(cfg.baseUrl).hostname) && !(await probe(cfg.baseUrl, { timeout: 300 }))) return null;
     if (!idle()) return null;
-    const part = await requestSentence(text, { cfg, fetchFn, signal: AbortSignal.timeout(timeout), priority: 'low' });
-    return part.frames ? withXing(Buffer.from(part.audio)) : null;
+    const { lead, body } = splitLead(String(text).trim());
+    const controller = new AbortController();
+    guestLine = controller;
+    try {
+      const signal = AbortSignal.any([AbortSignal.timeout(timeout), controller.signal]);
+      const part = await requestSentence(body, { cfg, style: lead || cfg.style, fetchFn, signal, priority: 'low' });
+      return part.frames ? withXing(Buffer.from(part.audio)) : null;
+    } finally { if (guestLine === controller) guestLine = null; }
   } catch {
     return null;
   }

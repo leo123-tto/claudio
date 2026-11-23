@@ -116,7 +116,10 @@ export const config = {
       noPreempt: env.PC5090_NO_PREEMPT !== '0',
       // 2026-11-22 老板听样本后定：整段合成（逐句切会让句间停顿变短、听着赶），并加语气提示；PC5090_SPLIT=1 恢复逐句
       split: env.PC5090_SPLIT === '1',
+      // 口播自带时段语气提示（server/tone.js）时用它的，这个只是兜底
       style: env.PC5090_STYLE ?? '[warm, relaxed late-night radio host, unhurried, with natural pauses]',
+      // fishgw 支持流式（/v1/health 带 stream_audio）时整段边合成边念；PC5090_STREAM=0 退回首句先合成
+      stream: env.PC5090_STREAM !== '0',
     },
   },
 
@@ -137,6 +140,17 @@ export const config = {
     fridayEveningNote: env.SCENE_FRIDAY_EVENING_NOTE ?? '',
     // 「我在 X」算上班的额外地点，逗号分隔（默认认单位 / 公司 / 办公室）
     workPlaces: String(env.SCENE_WORK_PLACES || '').split(',').map((item) => item.trim()).filter(Boolean),
+  },
+
+  // 口播语气档的钟点分界（HH:MM），见 server/tone.js。上班、午休跟着「此刻场景」走。
+  // 公用版和个人版同一个 Vera、同样的语气档（2026-11-23 老板定）；PUBLIC_TONE=mild 可让公用版夜里不撩不耳语。
+  tone: {
+    morningFrom: env.TONE_MORNING_FROM ?? '05:00',
+    dayFrom: env.TONE_DAY_FROM ?? '09:00',
+    eveningFrom: env.TONE_EVENING_FROM ?? '18:00',
+    nightFrom: env.TONE_NIGHT_FROM ?? '21:00',
+    lateFrom: env.TONE_LATE_FROM ?? '23:00',
+    publicLevel: env.PUBLIC_TONE === 'mild' ? 'mild' : 'full',
   },
 
   scheduler: {
