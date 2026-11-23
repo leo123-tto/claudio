@@ -39,6 +39,19 @@ test.beforeEach(() => {
   };
 });
 
+// Date.now 停住，计时器照常等真实时间，到点时把时钟拨到它的到期时刻；返回还原函数
+function fakeClock() {
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  let clock = realNow();
+  Date.now = () => clock;
+  globalThis.setTimeout = (fn, delay = 0, ...args) => {
+    const due = clock + delay;
+    return realSetTimeout(() => { clock = Math.max(clock, due); fn(...args); }, delay);
+  };
+  return () => { Date.now = realNow; globalThis.setTimeout = realSetTimeout; };
+}
+
 const pianoRecommendation = (extra = {}) => ({ styleRequest: '来点安静的钢琴', ...extra });
 const writeEvents = (events) => {
   fs.mkdirSync(path.dirname(eventStore.file), { recursive: true });
@@ -156,11 +169,15 @@ test('G11 两轮共用解析预算，超时后不再给近期候选新预算', a
     signal.addEventListener('abort', () => { aborted = true; });
     return new Promise(() => {});
   };
-  const ep = await finalizeEpisode(plan(play), { resolveTimeout: 20,
-    recommendation: pianoRecommendation({ recentSongs: [play[1]] }) });
-  assert.deepEqual(titles(ep), []);
-  assert.deepEqual(resolved, ['严格挂起']);
-  assert.equal(aborted, true);
+  // 假时钟：只有计时器到点时时间才走到它的到期时刻，慢机器卡顿、计时器早到一毫秒都不影响
+  const restore = fakeClock();
+  try {
+    const ep = await finalizeEpisode(plan(play), { resolveTimeout: 20,
+      recommendation: pianoRecommendation({ recentSongs: [play[1]] }) });
+    assert.deepEqual(titles(ep), []);
+    assert.deepEqual(resolved, ['严格挂起']);
+    assert.equal(aborted, true);
+  } finally { restore(); }
 });
 
 test('G11 第二轮只拿剩余预算，取消能中断第二轮', async () => {

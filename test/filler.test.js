@@ -80,6 +80,16 @@ test('前八首耗尽预算后，下一轮从第九首继续', async (t) => {
     cache: { has: () => false, ensure: async () => {} },
   });
   t.after(() => service.invalidate());
+  // 假时钟：只有计时器到点时时间才走到它的到期时刻，慢机器卡顿不会提前吃掉第二轮的预算
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  let clock = realNow();
+  Date.now = () => clock;
+  globalThis.setTimeout = (fn, delay = 0, ...args) => {
+    const due = clock + delay;
+    return realSetTimeout(() => { clock = Math.max(clock, due); fn(...args); }, delay);
+  };
+  t.after(() => { Date.now = realNow; globalThis.setTimeout = realSetTimeout; });
   assert.equal(await service.take(), null);
   assert.equal((await service.take())?.meta.id, 9);
 });
