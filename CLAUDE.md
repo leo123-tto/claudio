@@ -99,6 +99,7 @@ claudio/
 │  ├─ chat-mode.js          # 聊天模式（两版共用）：要不要马上换歌、最近几轮对话、聊天规则（放提示词末尾）
 │  ├─ talk.js                # 口播频率：话多 / 适中 / 安静 / 几乎不说；听懂「少说点」「今天别打扰我」；按开头 / 道别 / 换主题 / 整点 / 换时段定这一段说不说。当面说话的回复永远开口
 │  ├─ audio-quality.js       # 实际音质 {format, bitrate, sampleRate, bits}：网易云 song_url 的 type/br/sr，FLAC 读 64 字节文件头补位深；拿不到的不带
+│  ├─ quality-levels.js      # 歌曲音质档位（标准 / 较高 / 极高 / 无损 / Hi-Res / 超清母带，两版共用）；按 /song/detail 的 privileges 算这首能要哪几档
 │  ├─ version.js             # /api/mode 的 version：git 短号 → 部署前写的 server/version.json → package 版本 + 构建时间
 │  ├─ filler.js              # 大脑或语音没好时的垫场歌（收藏 + 最近放过；点了曲风先挑网易云曲风对得上的）
 │  ├─ audio-cache.js         # 本地音频缓存 cache/audio（LRU 400 MB，/media/:id）
@@ -163,6 +164,7 @@ claudio/
    ├─ ui.js                  # 两版共用的界面部件：封面 / 背景、对话条、沉浸歌词
    ├─ app.js                 # 个人版播放引擎：两路音乐 + 口播、领取 / 开声、垫场、暂停闸门、WS
    ├─ public.js              # 公用版播放引擎：单个 <audio> 顺序放、门口 / 绑定 / 配额 / 最近听过（apply.html / apply.js 是申请页）
+   ├─ quality-menu.js        # 音质菜单（两版共用）：点音质角标弹出档位，这首没有的标灰；自动降档时角标写「已自动降到 xx」；驾驶模式不弹
    ├─ transitions.js         # 音量包络（按绝对时间）、等功率曲线、按曲风定交叉淡入时长、等音频可播
    ├─ lyrics.js              # 歌词解析和平滑滚动（rAF，提前 0.25 秒）
    ├─ subtitle.js            # 口播字幕按语音时长逐字出
@@ -260,6 +262,9 @@ MVP 4 条 → 全功能 6 条：
 | POST | `/api/drive` | `{on}`：网页开 / 关驾驶模式（开着每 20 分钟再报一次，2 小时没报自动失效）。打开时已备好的节目不作废，只把口播改成一句、重新合成（WS `sayRevised`），之后新备的口播只说一句。公用版不走这个，点歌带 `drive:true` | ✅ |
 | GET | `/api/episode/:id/voice` | 这期口播的状态：ready / pending / skipped | ✅ |
 | GET | `/api/filler?exclude=` | 垫场歌一首（收藏 + 最近放过，优先已缓存的） | ✅ |
+| GET | `/api/song-levels?id=` | 音质菜单：这首能要哪几档（拿不准回 null，网页不标灰）+ 现在的档 | ✅ |
+| POST | `/api/quality` | `{level}`：音质菜单选一档，只改 `playback.quality`，不作废已备好的节目（开播前按新档重取链接） | ✅ |
+| GET | `/api/song-url?id=` | 按现在的档重取一首的链接和实际音质（换档后正在放的接着放、后面几首换链）；本地缓存有这一档就给 `/media` | ✅ |
 | GET | `/api/lyric?id=` | 歌词补取（WS 推丢或点歌后现取时，前端按需来要） | ✅ |
 | GET | `/media/:id` | 本地音频缓存里的歌（LRU 400 MB） | ✅ |
 | WS | `/stream` | `hello`（epoch / buffered）· `nextReady` · `voiceReady` · `episodesInvalidated`（换口味后旧节目作废）· `sayRevised`（开驾驶模式后备好的下一段口播改短了）· `scheduled`（定时节目，已替前端领取，带 `claimId`）· `sayDraft`（口播稿写完先出文字）· `sayReady` / `sayFailed` · `lyrics` · `ttsLane`（5090 语音档 starting / busy / ready / offline / error）· `handoff`（某台设备开始响，其他设备暂停） | ✅ |
@@ -312,6 +317,7 @@ MVP 4 条 → 全功能 6 条：
 | POST | `/guest/song-url` | `{"id","level","title?","artist?","duration?"}` | 公用版未绑定账号时取播放地址；放不了且给了歌名就问音源插件。每分钟最多 40 次 |
 | POST | `/guest/find` | `{"ncmId?","title","artist","duration?","level"}` | 只问音源插件（绑定的人自己放不了时用） |
 | POST | `/guest/lyric` | `{"id"}` | 插件歌曲的歌词 |
+| POST | `/guest/levels` | `{"id"}` | 音质菜单：这首按运营者的账号能要哪几档（没绑定的人用） |
 
 `/guest/*` 只回歌的信息和播放地址，只搜歌、取地址，不碰播放记录、收藏、记忆、音频缓存。公用版设 `PUBLIC_BORROW_OWNER=0` 关掉。
 

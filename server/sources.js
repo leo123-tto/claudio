@@ -25,6 +25,7 @@ const PREFIX_RE = /^[a-z]{2,4}$/;
 const ALT_ID_RE = /^([a-z]{2,4})(\d{1,20})$/;
 const MIN_BPS = 96_000;
 const QUALITY_PLAN = {
+  jymaster: ['lossless', 'exhigh'],
   hires: ['lossless', 'exhigh'],
   lossless: ['lossless', 'exhigh'],
   exhigh: ['exhigh', 'standard'],
@@ -201,7 +202,7 @@ export function createSourceRegistry({
       let label;
       if (info.flac || format === 'flac') {
         const hires = info.flac && (info.flac.bits > 16 || info.flac.sampleRate > 48_000);
-        label = hires && level === 'hires' ? 'hires' : 'lossless';
+        label = hires && (level === 'hires' || level === 'jymaster') ? 'hires' : 'lossless';
       } else if (format !== 'mp3' || bps < MIN_BPS) {
         continue;
       } else {

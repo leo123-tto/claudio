@@ -127,3 +127,25 @@ test('同歌共享下载，取消一个请求不影响仍需要音频的另一�
   assert.equal((await right).url, '/media/41');
   assert.equal(downloads, 1);
 });
+
+test('音质换档后缓存里别的档不算数、下载时换掉；/media 仍能放旧档；没记档的旧文件按极高算', async (t) => {
+  let level = 'exhigh';
+  let downloads = 0;
+  const { root, cache } = setup(t, { level: () => level, fetch: async () => { downloads += 1; return audio(); } });
+  await cache.ensure({ id: 7, url: 'https://m7.music.126.net/a.mp3', quality: { format: 'mp3', bitrate: 320000 } });
+  assert.equal(cache.has('7'), true);
+  assert.deepEqual(cache.info('7').quality, { format: 'mp3', bitrate: 320000 });
+  level = 'lossless';
+  assert.equal(cache.has('7'), false);
+  assert.ok(cache.resolve('/media/7'), '换档后旧文件 /media 照样能放');
+  const fresh = await cache.ensure({ id: 7, url: 'https://m7.music.126.net/a.flac', level: 'lossless' });
+  assert.equal(fresh.level, 'lossless');
+  assert.equal(downloads, 2);
+  assert.equal(cache.has('7'), true);
+  // 以前没记档的文件
+  fs.writeFileSync(path.join(root, '8.audio'), Buffer.alloc(1200, 1));
+  fs.writeFileSync(path.join(root, '8.json'), JSON.stringify({ size: 1200, contentType: 'audio/mpeg' }));
+  assert.equal(cache.has('8'), false);
+  level = 'exhigh';
+  assert.equal(cache.has('8'), true);
+});

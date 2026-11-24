@@ -12,7 +12,7 @@
     <meta name="apple-mobile-web-app-title" content="Claudio" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <script src="/theme.js"></script>
-    <link rel="stylesheet" href="/styles.css?v=17" />
+    <link rel="stylesheet" href="/styles.css?v=18" />
     <link rel="stylesheet" href="/friends.css?v=1" />
   </head>
   <body>
@@ -91,7 +91,7 @@
             <div class="now-meta" id="nowMeta"></div>
             <div class="chips">
               <div class="chip" id="nowState">READY</div>
-              <div class="chip quality hidden" id="nowQuality"></div>
+              <button type="button" class="chip quality hidden" id="nowQuality" aria-label="音质"></button>
               <div class="chip rec-from hidden" id="recFrom"></div>
             </div>
           </div>
@@ -302,13 +302,6 @@
             <h3>网易云</h3>
             <div class="row"><span id="ncmState"></span><button class="btn-line" id="ncmBtn" type="button"></button></div>
           </section>
-          <section class="group hidden" id="qualityGroup">
-            <h3>音质</h3>
-            <div class="seg" id="qualitySeg" role="radiogroup" aria-label="音质">
-              <button type="button" role="radio" data-value="smooth" aria-checked="false">流畅（320k）</button>
-              <button type="button" role="radio" data-value="lossless" aria-checked="true">无损（CD）</button>
-            </div>
-          </section>
           <section class="group">
             <h3>口播</h3>
             <div class="seg" id="talkSeg" role="radiogroup" aria-label="口播">
@@ -422,6 +415,6 @@
       </section>
     </div>
 
-    <script src="/boot.js?v=10" type="module"></script>
+    <script src="/boot.js?v=11" type="module"></script>
   </body>
 </html>

@@ -4,6 +4,7 @@
 // 不放在 8090：那个端口经 Tailscale serve 对 tailnet 开着。
 import http from 'node:http';
 import { plainText } from './tts/tags.js';
+import { LEVELS as QUALITY_LEVELS } from './quality-levels.js';
 
 const MAX_BODY = 2048;
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -22,7 +23,7 @@ export const GUEST_TTS_RAW_MAX = 400;
 // guest：公用版未绑定账号时经主实例取歌（{ search, songUrl, find, lyric }，见 ncm.js 的 guest* 函数）。
 // 只搜、只取链接；老板的 cookie 不出老板实例，回给公用版的只有歌的信息和直链。
 const SONG_ID = /^(\d{1,15}|[a-z]{2,4}\d{1,20})$/;
-const LEVELS = new Set(['standard', 'higher', 'exhigh', 'lossless', 'hires']);
+const LEVELS = new Set(QUALITY_LEVELS);
 const GUEST_URLS_PER_MIN = 40;
 function guestSong(body) {
   return {
@@ -53,6 +54,16 @@ async function handleGuest(guest, route, body, reply, { urlTimes }) {
       const song = guestSong(body);
       if (!song.title) return reply(400, { ok: false });
       return reply(200, { ok: true, song: await guest.find(song, { level }) });
+    }
+    if (route === '/guest/levels') {
+      const id = String(body.id || '');
+      if (!SONG_ID.test(id) || !guest.levels) return reply(400, { ok: false });
+      // 和取链接合着算每分钟上限（打的是同一个账号）
+      const now = Date.now();
+      while (urlTimes.length && urlTimes[0] <= now - 60_000) urlTimes.shift();
+      if (urlTimes.length >= GUEST_URLS_PER_MIN) return reply(503, { ok: false, busy: true });
+      urlTimes.push(now);
+      return reply(200, { ok: true, levels: await guest.levels(id) });
     }
     if (route === '/guest/lyric') {
       const id = String(body.id || '');
@@ -159,5 +170,6 @@ export function createOwnerChannel(url, { fetchFn = fetch } = {}) {
     async songUrl(song, { signal } = {}) { return (await ask('/guest/song-url', song, 25_000, signal)).audio || null; },
     async find(song, { signal } = {}) { return (await ask('/guest/find', song, 25_000, signal)).song || null; },
     async lyric(id, { signal } = {}) { return (await ask('/guest/lyric', { id }, 6_000, signal)).lrc || ''; },
+    async levels(id, { signal } = {}) { return (await ask('/guest/levels', { id }, 6_000, signal)).levels || null; },
   };
 }

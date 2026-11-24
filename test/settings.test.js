@@ -79,7 +79,8 @@ test('设置补丁只允许已知模型、供应商和推荐模式', () => {
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { recommendation: { mode: 'chaos' } }));
   assert.equal(mergeSettings(DEFAULT_SETTINGS, { playback: { quality: 'lossless' } }).playback.quality, 'lossless');
   assert.equal(mergeSettings(DEFAULT_SETTINGS, { playback: { quality: 'hires' } }).playback.quality, 'hires');
-  assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { playback: { quality: 'jymaster' } }));
+  assert.equal(mergeSettings(DEFAULT_SETTINGS, { playback: { quality: 'jymaster' } }).playback.quality, 'jymaster');
+  assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { playback: { quality: 'jyeffect' } }));
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { playback: { quality: 'sky' } }));
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { secret: 'do-not-accept' }));
   assert.throws(() => mergeSettings(DEFAULT_SETTINGS, { llm: { models: { local: 'bad name' } } }));
@@ -100,7 +101,7 @@ test('公开设置不包含任何密钥或环境变量值', () => {
   assert.equal(publicValue.llm.provider, 'local');
   assert.deepEqual(publicValue.playback, DEFAULT_SETTINGS.playback);
   assert.deepEqual(publicValue.options.providers, ['local', 'claude', 'deepseek']);
-  assert.deepEqual(publicValue.options.audioQualities, ['standard', 'higher', 'exhigh', 'lossless', 'hires']);
+  assert.deepEqual(publicValue.options.audioQualities, ['standard', 'higher', 'exhigh', 'lossless', 'hires', 'jymaster']);
   assert.deepEqual(publicValue.tts, DEFAULT_SETTINGS.tts);
   assert.deepEqual(publicValue.availability, { local: true, claude: false, deepseek: true });
   assert.deepEqual(publicValue.credentials, {

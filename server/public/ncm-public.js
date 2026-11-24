@@ -16,6 +16,7 @@ import { rankHits, VERSION_RE } from '../ncm.js';
 import { createTimeoutSignal } from '../llm/openai-chat.js';
 import { requestSlot, reportCooldown } from '../ncm-shared.js';
 import { makeQuality as cleanQuality, ncmQuality, withFlacHeader } from '../audio-quality.js';
+import { ALT_LEVELS, levelRank, levelsFromPrivilege } from '../quality-levels.js';
 
 export class NcmBusyError extends Error {
   constructor(message = '排队中，稍后再试') {
@@ -250,11 +251,14 @@ export function createNcmClient({
   // 要 level 那一档；这首没有时网易云自己降档。无损（会员才有）拿不到链接时再按 exhigh 要一次。
   // gain：把这首拉到 -18 LUFS 要加的分贝（2026-11-23 实测 7 首「ebur128 实测 + gain」都在 -17.9±0.05），
   // 网页按它统一响度；试听版的 gain=2 / peak=0 是占位，不算。
+  // 超清母带账号不够时网易云退给环绕声处理版（jyeffect / sky），不要那个，改要 Hi-Res。
   async function ncmSongUrl(id, { level = 'exhigh', ...options } = {}) {
-    for (const lv of level === 'lossless' ? ['lossless', 'exhigh'] : [level]) {
+    const ladder = level === 'jymaster' ? ['jymaster', 'hires', 'lossless', 'exhigh']
+      : level === 'hires' ? ['hires', 'lossless', 'exhigh'] : level === 'lossless' ? ['lossless', 'exhigh'] : [level];
+    for (const lv of ladder) {
       const data = await call('/song/url/v1', { id, level: lv, crypto: 'weapi' }, options);
       const item = data?.data?.[0];
-      if (!item?.url) continue;
+      if (!item?.url || (lv === 'jymaster' && ['jyeffect', 'sky'].includes(item.level))) continue;
       const peak = Number(item.peak) || 0;
       const gain = Number(item.gain);
       const trial = Boolean(item.freeTrialInfo);
@@ -279,7 +283,7 @@ export function createNcmClient({
     ...(cleanQuality(audio.quality) ? { quality: cleanQuality(audio.quality) } : {}),
   };
 
-  // 公用版的「无损」只到 CD 级（16 bit、≤48 kHz）：音频走家里上行，Hi-Res 带不动。
+  // 公用版的「无损」档只到 CD 级（16 bit、≤48 kHz），是默认档；要 Hi-Res / 超清母带得在音质菜单里自己选（走 CDN 直链，不占家里上行）。
   // 网易云和备用音源的「无损」档拿到的是哪种母带就给哪种（实测一半是 24 bit），所以拿到后看文件头再定：
   // 超了先找备用音源有没有同一首的 CD 版，没有就要 320k。判过超的歌记一天，下次直接要 320k。
   async function songUrl(id, options = {}) {
@@ -316,6 +320,29 @@ export function createNcmClient({
       throw error;
     });
     return altView(alt) || audio;
+  }
+
+  // 音质菜单：这首能要哪几档。绑定的人按自己的账号问，没绑定的问主实例（运营者配置的默认音源）；拿不准回 null
+  const levelCache = new Map();
+  async function levels(id, { cookie = '', memberId = '' } = {}) {
+    const key = String(id);
+    if (!/^\d+$/.test(key)) return ALT_LEVELS;
+    const cacheKey = `${cookieKey(cookie)}|${key}`;
+    const hit = levelCache.get(cacheKey);
+    if (hit && hit.until > now()) return hit.levels;
+    let list = null;
+    if (cookie) {
+      const detail = await call('/song/detail', { ids: key }, { cookie, memberId });
+      list = levelsFromPrivilege(detail?.privileges?.find((p) => String(p?.id) === key) || detail?.privileges?.[0]);
+    } else if (owner?.levels) {
+      const bucket = memberBucket(memberId);
+      if (bucket && !(await bucket.acquire(waitMs, sleep))) throw memberBusy();
+      list = await viaOwner(owner.levels(key)).catch(() => null);
+      if (Array.isArray(list)) list = list.filter((lv) => levelRank(lv) >= 0);
+    }
+    levelCache.set(cacheKey, { levels: list, until: now() + 6 * 3600_000 });
+    if (levelCache.size > 2000) levelCache.delete(levelCache.keys().next().value);
+    return list;
   }
 
   // 网易云连歌都没搜到（或搜索在排队）：整首用备用音源的
@@ -471,5 +498,5 @@ export function createNcmClient({
     return Number(data?.code) === 200;
   }
 
-  return { borrowsOwner: Boolean(owner), call, search, songUrl, resolve, freeChart, playById, lyric, qrStart, qrCheck, account, taste, dailyRecommend, personalFm, simiSongs, like, paused };
+  return { borrowsOwner: Boolean(owner), call, search, songUrl, levels, resolve, freeChart, playById, lyric, qrStart, qrCheck, account, taste, dailyRecommend, personalFm, simiSongs, like, paused };
 }

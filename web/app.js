@@ -8,7 +8,8 @@ import { listenForAnswer, withoutAsk, REC_ASK_TAIL, REC_STASHED_LINE } from './r
 import { envelopeValue, equalPower, crossfadeDuration, mediaDeadline, waitForPlaying, waitForCanPlay } from './transitions.js';
 import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
 import { typewriter, renderStatic } from './subtitle.js';
-import { createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality } from './ui.js';
+import { createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter } from './ui.js';
+import { createQualityMenu } from './quality-menu.js';
 
 // Claudio · 点阵电台播放器
 // 两路音乐与独立口播混音；声音编排不依赖窗口绘制。
@@ -89,7 +90,7 @@ const OPTION_LABELS = {
   sonnet: 'Sonnet', opus: 'Opus',
   'deepseek-flash': 'V4.1 Flash', 'deepseek-v4-pro': 'V4 Pro',
   s1: 'S1', 's2-pro': 'S2-Pro',
-  standard: '标准', higher: '较高', exhigh: '极高', lossless: '无损', hires: 'Hi-Res',
+  standard: '标准', higher: '较高', exhigh: '极高', lossless: '无损', hires: 'Hi-Res', jymaster: '超清母带',
 };
 const FISH_RECHARGE = 'https://fish.audio/zh-CN/app/developers/';
 const seconds = (ms) => (ms / 1000).toFixed(1);
@@ -166,6 +167,7 @@ function paintSettings() {
   el.fishVoiceId.value = tts.fish.referenceId || '';
   segSelect(el.modeSeg, recommendation.mode);
   fillSelect(el.audioQualitySelect, options.audioQualities, playback.quality);
+  qLevel = playback.quality;
   // 本地语气扩展：数据目录里有那个文件才出现，名字也由文件定
   const extension = settingsPayload.toneExtension;
   el.toneExtensionField.classList.toggle('hidden', !extension);
@@ -404,10 +406,82 @@ onSeg(el.themeSeg, applyTheme);
 const covers = createCovers({ imgs: [...document.querySelectorAll('.cover-img')], bdA: el.bdA, bdB: el.bdB });
 const paintThumbs = covers.paintThumbs;
 const setBackdrop = covers.setBackdrop;
-function setNowPlaying(title, { artist = '', facts = '', cover = '', quality = null } = {}) {
+// 音质菜单（点音质角标）：选一档就改设置里的歌曲音质（不作废备好的节目），正在放的这首换链接着放，后面几首按新档重取链接。
+// 口播压着、交叉淡入、单独送音箱时正在放的不换，下一首起生效。
+let qLevel = '';
+const qualityMenu = createQualityMenu({
+  chip: el.nowQuality,
+  state: () => ({ chosen: qLevel, auto: '', proxied: '', song: slots.get(active)?.item?.meta?.id ? slots.get(active).item.meta : null }),
+  levels: async (song) => {
+    const data = await (await fetch(`/api/song-levels?id=${encodeURIComponent(song.id)}`)).json();
+    if (data.current) qLevel = data.current;
+    return data.levels;
+  },
+  async pick(level) {
+    try { await sendJson('/api/quality', 'POST', { level }, '音质没换成'); } catch (error) { logChat('dj', error.message); return; }
+    qLevel = level;
+    if (settingsPayload?.playback) { settingsPayload.playback.quality = level; el.audioQualitySelect.value = level; }
+    await Promise.all([swapActiveQuality(level), refetchUpcoming(level)]);
+  },
+});
+
+async function songUrlNow(item) {
+  const data = await (await fetch(`/api/song-url?id=${encodeURIComponent(item.meta.id)}`)).json();
+  if (!data.ok || !data.url) throw new Error(data.error || '这一档拿不到这首');
+  return data;
+}
+// 后面还没放的几首（这一期剩下的、已领好的下一期）按新档重取；已经预载到空闲轨的作废，到时候重新预载
+async function refetchUpcoming(level) {
+  const items = [...queue.slice(idx + 1), ...(pendingEpisode?.episode?.queue || [])].filter((q) => q?.type === 'song' && q.meta?.id);
+  await Promise.all(items.map(async (item) => {
+    try {
+      const data = await songUrlNow(item);
+      item.url = data.url;
+      item.meta.asked = level;
+      item.meta.quality = data.quality || null;
+      if (slots.get(idle)?.prepared && slots.get(idle)?.item === item) { idle.pause(); slots.delete(idle); }
+    } catch { /* 取不到就按原来的链接放 */ }
+  }));
+}
+// 正在放的这首换链、接着原来的进度放。换的时候把这一轨标成加载中，结束 / 出错不会被当成这首放完
+async function swapActiveQuality(level) {
+  const track = active;
+  const slot = slots.get(track);
+  const item = slot?.item;
+  if (!item?.meta?.id || slot.loading || musicFade || overlaying || exclusiveSink?.uid || stopped) return;
+  let data;
+  try { data = await songUrlNow(item); } catch (error) { logChat('dj', error.message); return; }
+  if (slots.get(track) !== slot || active !== track || musicFade || overlaying || stopped) return;
+  const at = track.currentTime;
+  const wasPaused = track.paused;
+  const oldSrc = track.src;
+  slot.loading = true;
+  try {
+    track.src = proxyUrl(data.url);
+    if (wasPaused) await new Promise((done, fail) => {
+      track.addEventListener('loadedmetadata', done, { once: true });
+      track.addEventListener('error', () => fail(new Error('新链接放不了')), { once: true });
+    });
+    else await waitForPlaying(track, { timeoutMs: mediaDeadline(data.url) });
+    try { track.currentTime = at; } catch { /* 不能拖就从头放 */ }
+    if (paused || stopped) track.pause(); // 换链途中按了暂停 / 停止
+    item.url = data.url;
+    item.meta.asked = level;
+    item.meta.quality = data.quality || null;
+    qualityMenu.paint(item.meta.quality, true);
+  } catch {
+    track.src = oldSrc;
+    try { track.currentTime = at; } catch { /* 原链接也过期了就算了 */ }
+    if (!wasPaused) track.play().catch(() => {});
+  } finally {
+    if (slots.get(track) === slot) slot.loading = false;
+  }
+}
+
+function setNowPlaying(title, { artist = '', facts = '', cover = '', quality = null, song = false } = {}) {
   el.nowTitle.textContent = title;
   el.nowMeta.textContent = [artist, facts].filter(Boolean).join(' · ');
-  paintQuality(el.nowQuality, quality);
+  qualityMenu.paint(quality, song);
   paintThumbs(cover);
 }
 
@@ -1098,6 +1172,7 @@ function showSong(item, i) {
     facts: [item.meta.year, item.meta.genre].filter(Boolean).join(' · '),
     cover: item.meta.cover,
     quality: item.meta.quality,
+    song: true,
   });
   setBackdrop(item.meta.cover);
   setState('正在播放');

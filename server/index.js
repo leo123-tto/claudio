@@ -31,7 +31,7 @@ import {
   extractJson,
   normalizeResult,
 } from './llm/index.js';
-import { getSettings, updateSettings, toPublicSettings } from './settings.js';
+import { AUDIO_QUALITIES, audioQuality, getSettings, updateSettings, toPublicSettings } from './settings.js';
 import { credentialStatus, getSecret, updateSecrets } from './secrets.js';
 import * as ncm from './ncm.js';
 import { synthesize } from './tts/index.js';
@@ -191,6 +191,9 @@ function updatePins() {
   for (const ep of held) {
     for (const item of ep.queue.filter((q) => q.type === 'song')) {
       if (services.cache.has(item.meta.id)) { item.url = `/media/${item.meta.id}`; continue; }
+      // 换了音质还没按新档取链接的，先不缓存（开播前 refresh 会按新档重取）
+      const asked = item.meta.asked || item.meta.requestedLevel || '';
+      if (asked && asked !== audioQuality()) continue;
       const remoteUrl = item.meta.remoteUrl || item.url;
       const previous = cachedDownloads.get(String(item.meta.id));
       if (previous?.url === remoteUrl) continue;
@@ -198,7 +201,7 @@ function updatePins() {
       const controller = new AbortController();
       const job = { controller, epoch: ep.epoch, url: remoteUrl };
       cachedDownloads.set(String(item.meta.id), job);
-      services.cache.ensure({ id: item.meta.id, url: item.meta.remoteUrl || item.url }, { signal: controller.signal })
+      services.cache.ensure({ id: item.meta.id, url: item.meta.remoteUrl || item.url, level: asked || audioQuality(), quality: item.meta.quality }, { signal: controller.signal })
         .then((cached) => {
           if (!controller.signal.aborted && ep.epoch === episodeBuffer.snapshot().epoch) item.url = cached.url;
         }).catch(() => {}).finally(() => {
@@ -284,7 +287,7 @@ const episodeBuffer = createEpisodeBuffer({
   },
   offline: () => getSettings().tts.provider === 'pc5090' && ['busy', 'error', 'offline'].includes(getLaneStatus()?.state),
   refresh: async (ep, { signal }) => {
-    await ncm.withNcmSource('refresh', () => refreshEpisodeUrls(ep, { signal, cache: services.cache, songUrl: (...args) => services.ncm.songUrl(...args) }));
+    await ncm.withNcmSource('refresh', () => refreshEpisodeUrls(ep, { signal, cache: services.cache, songUrl: (...args) => services.ncm.songUrl(...args), level: audioQuality() }));
     signal.throwIfAborted();
     updatePins();
     return ep;
@@ -516,7 +519,7 @@ export async function finalizeEpisode(result, {
         bridgeFrom: song.candidate.bridgeFrom || '',
         ...(song.lane ? { lane: song.lane } : {}), ...(song.year ? { year: song.year } : {}),
         ...(song.genre ? { genre: song.genre } : {}), ...(song.cover ? { cover: song.cover } : {}),
-        ...(song.quality ? { quality: song.quality } : {}) } })),
+        ...(song.quality ? { quality: song.quality } : {}), ...(song.requestedLevel ? { asked: song.requestedLevel } : {}) } })),
   };
   historyDetails.set(ep, recommendation);
   for (const item of ep.queue) {
@@ -922,8 +925,40 @@ app.get('/api/playback', async (_req, res) => {
   // 网易云直链会过期：接着放之前刷新一次（不搜索，只取直链）。
   const ep = { queue: [state.song, ...state.queue] };
   await ncm.withNcmSource('refresh', () => refreshEpisodeUrls(ep, { cache: services.cache,
-    songUrl: (...args) => services.ncm.songUrl(...args), signal: AbortSignal.timeout(4000) })).catch(() => {});
+    songUrl: (...args) => services.ncm.songUrl(...args), signal: AbortSignal.timeout(4000), level: audioQuality() })).catch(() => {});
   res.json({ ok: true, state });
+});
+
+// ── 音质菜单（点页面上的音质角标）──
+// 这首能要哪几档；拿不准回 null（网页就不标灰）
+app.get('/api/song-levels', async (req, res) => {
+  const id = String(req.query.id || '');
+  if (!/^(\d{1,15}|[a-z]{2,4}\d{1,20})$/.test(id)) return res.status(400).json({ ok: false, error: '歌曲 ID 不对' });
+  const levels = await services.ncm.songLevels(id, { signal: AbortSignal.timeout(6000) }).catch(() => null);
+  res.json({ ok: true, levels, current: audioQuality() });
+});
+// 选一档：只改 playback.quality，不作废已备好的节目（开播前按新档重取链接，见 refreshEpisodeUrls）
+app.post('/api/quality', (req, res) => {
+  const level = String(req.body?.level || '');
+  if (!AUDIO_QUALITIES.includes(level)) return res.status(400).json({ ok: false, error: '不支持的歌曲音质' });
+  updateSettings({ playback: { quality: level } });
+  updatePins();
+  res.json({ ok: true, level });
+});
+// 按现在的档重取一首的链接（换档后当前这首接着放、后面几首换链）。本地缓存里有这一档就给 /media
+app.get('/api/song-url', async (req, res) => {
+  const id = String(req.query.id || '');
+  if (!/^(\d{1,15}|[a-z]{2,4}\d{1,20})$/.test(id)) return res.status(400).json({ ok: false, error: '歌曲 ID 不对' });
+  const level = audioQuality();
+  const cached = services.cache.has(id) && services.cache.info(id);
+  if (cached) return res.json({ ok: true, url: cached.url, level, ...(cached.quality ? { quality: cached.quality } : {}) });
+  try {
+    const audio = await ncm.withNcmSource('refresh', () => services.ncm.songUrl(id, level, { signal: AbortSignal.timeout(8000) }));
+    if (!audio?.url) return res.status(404).json({ ok: false, error: '这一档拿不到这首' });
+    res.json({ ok: true, url: audio.url, level, ...(audio.quality ? { quality: audio.quality } : {}) });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: String(error?.message ?? error) });
+  }
 });
 
 app.get('/api/settings', (_req, res) => {
@@ -1523,6 +1558,12 @@ app.get('/api/episode/:id/voice', (req, res) => res.json(episodeBuffer.getVoice(
 app.get('/api/filler', async (req, res) => {
   try {
     const item = await filler.take(String(req.query.exclude || '').split(',').filter(Boolean));
+    // 垫场歌是早先按旧音质取的：换过音质就按现在的档重取链接
+    const asked = item?.meta?.asked || item?.meta?.requestedLevel;
+    if (item && asked && asked !== audioQuality()) {
+      await ncm.withNcmSource('refresh', () => refreshEpisodeUrls({ queue: [item] }, { cache: services.cache,
+        songUrl: (...args) => services.ncm.songUrl(...args), signal: AbortSignal.timeout(4000), level: audioQuality() })).catch(() => {});
+    }
     res.json(item ? { ok: true, item } : { ok: false, error: '暂时没有可用的垫场歌' });
   } catch { res.json({ ok: false, error: '暂时没有可用的垫场歌' }); }
 });

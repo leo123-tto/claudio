@@ -2,7 +2,8 @@
 // 界面和个人版同一份（index.html / styles.css / ui.js）；这里只管公用版的播放、门口、绑定、配额、最近听过。
 import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
 import { listenForAnswer, withoutAsk, ANSWER_FALLBACK_MS, REC_STASHED_LINE } from './rec-ask.js';
-import { createCovers, createChatStrip, wireImmersive, MASCOT, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality } from './ui.js';
+import { createCovers, createChatStrip, wireImmersive, MASCOT, fmtTime, paintProgress, seekFraction, paintHeart, onEnter } from './ui.js';
+import { createQualityMenu, isLevel, minLevel, rank, stepDown } from './quality-menu.js';
 
 const $ = (id) => document.getElementById(id);
 const audio = document.createElement('audio');
@@ -14,8 +15,11 @@ let current = null;
 let fetching = false;
 let heartbeatTimer = null;
 let qrTimer = null;
-// 这次打开网页卡顿过、降到 320k 了（见「卡顿自动降档」）；同一个标签页刷新还算
-let smooth = (() => { try { return sessionStorage.getItem('dj_smooth') === '1'; } catch { return false; } })();
+// 音质：这台设备在音质菜单里选的档（localStorage，没选过按默认，见 defaultLevel）；卡顿自动降档另记一个上限（sessionStorage，
+// 同一个标签页刷新还算，旧版的 dj_smooth 当 320k）。实际要的 = 两个里低的那个
+let autoCap = (() => {
+  try { return sessionStorage.getItem('dj_auto_q') || (sessionStorage.getItem('dj_smooth') === '1' ? 'exhigh' : ''); } catch { return ''; }
+})();
 let srcChangedAt = 0;
 let seekedAt = 0;
 let stalls = 0;
@@ -38,6 +42,14 @@ const store = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
   set(key, value) { try { localStorage.setItem(key, value); } catch { /* 无痕窗口存不了就算了 */ } },
 };
+
+// 没选过就是默认：绑定的会员无损 CD，其余（含以前在账号面板选过「流畅」的）320k
+const defaultLevel = () => (me?.bound && me?.vip && me?.quality !== 'smooth' ? 'lossless' : 'exhigh');
+const chosenLevel = () => (isLevel(store.get('dj_quality')) ? store.get('dj_quality') : defaultLevel());
+const autoLevel = () => (isLevel(autoCap) && rank(autoCap) < rank(chosenLevel()) ? autoCap : '');
+const wanted = () => minLevel(chosenLevel(), autoLevel() || chosenLevel());
+// /media 是退路（经家里上行）：最高到 CD
+const proxyLevel = () => minLevel(wanted(), 'lossless');
 
 function show(view) {
   for (const id of ['loading', 'gate', 'app']) $(id).classList.toggle('hidden', id !== view);
@@ -64,9 +76,6 @@ function renderMe() {
   $('memState').textContent = typeof me.notesCount === 'number'
     ? (me.notesCount ? `她记着你 ${me.notesCount} 件事` : '还没记什么')
     : (me.prefs?.length ? me.prefs.join('、') : '还没记什么');
-  // 音质只有绑定的会员能选（别的一直是 320k）
-  $('qualityGroup').classList.toggle('hidden', !(me.bound && me.vip));
-  for (const b of $('qualitySeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (me.quality || 'lossless')));
   for (const b of $('talkSeg').querySelectorAll('button')) b.setAttribute('aria-checked', String(b.dataset.value === (me.talk || 'normal')));
   // 本地语气扩展：服务端数据目录里有那份文件才出现，名字也由文件定
   $('adultGroup').classList.toggle('hidden', !me.adultLabel);
@@ -132,12 +141,33 @@ $('pairForm').addEventListener('submit', async (event) => {
 const covers = createCovers({ imgs: [...document.querySelectorAll('.cover-img')], bdA: $('bdA'), bdB: $('bdB') });
 const sized = (url, size) => (url ? `${url}?param=${size}y${size}` : '');
 
+// 音质菜单：选了记在这台设备上，清掉卡顿降档，正在放的立刻换；后面的开播前按新档重取
+const quality = createQualityMenu({
+  chip: $('nowQuality'),
+  specs: { lossless: 'CD' },
+  state: () => ({
+    chosen: chosenLevel(),
+    auto: autoLevel(),
+    proxied: current?.proxied ? '这首走家里网络中转，最高到无损 CD' : '',
+    song: current,
+  }),
+  levels: async (song) => (await api(`/api/song/${encodeURIComponent(song.id)}/levels`)).levels,
+  async pick(level) {
+    store.set('dj_quality', level);
+    autoCap = '';
+    stalls = 0;
+    try { sessionStorage.removeItem('dj_auto_q'); sessionStorage.removeItem('dj_smooth'); } catch { /* 无痕窗口 */ }
+    setNotice('');
+    await swapCurrent();
+  },
+});
+
 // 状态条是个人版的（正在播放 / 正在念口播）；公用版只标音质
 $('nowState').classList.add('hidden');
 function setNowPlaying(song, title = '') {
   $('nowTitle').textContent = song?.title || title;
   $('nowMeta').textContent = song?.artist || '';
-  paintQuality($('nowQuality'), song?.quality);
+  quality.paint(song?.quality, Boolean(song?.id));
   covers.paintThumbs(sized(song?.cover, 600));
   covers.setBackdrop(sized(song?.cover, 600));
   document.title = song?.title ? `${song.title} · Claudio` : 'Claudio';
@@ -280,8 +310,10 @@ async function ask(text = '') {
   $('moodInput').disabled = true;
   if (text) { chatStrip.add('user', text); showDj('…'); $('djSay').classList.add('typing'); }
   try {
-    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on'), smooth, ahead: Boolean(current),
+    const level = wanted();
+    const out = await api('/api/chat', { method: 'POST', body: { text, drive: document.body.classList.contains('drive-on'), quality: level, ahead: Boolean(current),
       ...(text && chatEnabled() ? { chatMode: true } : {}) } });
+    for (const song of out.songs || []) song.asked = level;
     if (typeof out.remaining === 'number') me.remaining = out.remaining;
     renderMe();
     if (out.needBind) { if (text) showStage(current ? 'lyric' : 'none'); return startQr(); }
@@ -552,10 +584,10 @@ async function startSong(blocked) {
   if (mode === 'voice') showStage('lyric');
   mode = 'song';
   const song = current;
-  // 这次卡过、降到 320k 了：队列里早先取的无损歌换成 320k 的再放
-  if ((smooth || me?.quality === 'smooth') && song.level === 'lossless') await refetch(song, { q: 'exhigh' }).catch(() => {});
+  // 早先按别的档取的（换过音质、卡顿降过档）：按现在的档重取再放
+  if (song.asked !== wanted()) await refetch(song).catch(() => {});
   if (current !== song) return;
-  setSrc(song.direct || song.url);
+  setSrc(srcOf(song));
   applyLoudness(song.gain);
   song.ladder = null;
   try {
@@ -596,12 +628,11 @@ $('bar').addEventListener('click', (event) => {
   audio.currentTime = seekFraction($('bar'), event) * audio.duration;
 });
 
-// 放不了时按顺序退：① 重取直链再放（多半是过期了）② 走家里的同源代理，同一档 ③ 代理要 320k（这台浏览器多半放不了 FLAC）
-// 没有直链的歌只有 ②（无损的直接 ③）。都不行换下一首
+// 放不了时按顺序退：① 重取直链再放（多半是过期了）② 走家里的同源代理（最高 CD）③ 代理要 320k（这台浏览器多半放不了 FLAC）
+// 没有直链的歌没有 ①。都不行换下一首
 function fallbacks(song) {
-  const ladder = song.direct ? ['direct', 'proxy'] : [];
-  if (song.level === 'lossless') ladder.push('low');
-  else if (!song.direct) ladder.push('proxy');
+  const ladder = song.direct ? ['direct', 'proxy'] : ['proxy'];
+  if (rank(proxyLevel()) > rank('exhigh')) ladder.push('low');
   return ladder;
 }
 audio.addEventListener('error', async () => {
@@ -613,16 +644,20 @@ audio.addEventListener('error', async () => {
   song.ladder ??= fallbacks(song);
   const step = song.ladder.shift();
   if (step === 'direct') {
-    try { await refetch(song, { fresh: true, ...(smooth ? { q: 'exhigh' } : {}) }); } catch { /* 下一次 error 走代理 */ }
+    try { await refetch(song, { fresh: true }); } catch { /* 下一次 error 走代理 */ }
     if (current !== song) return;
     setSrc(song.direct || `/media/${song.id}?fresh=1`, at);
     return audio.play().catch(() => {});
   }
   if (step === 'proxy' || step === 'low') {
-    const low = step === 'low' || smooth;
-    setSrc(`/media/${song.id}?fresh=1${low ? '&q=exhigh' : ''}`, at);
-    // 退到普通档后实际音质不知道了，不标（不猜）
-    if (step === 'low') paintQuality($('nowQuality'), null);
+    const q = step === 'low' ? 'exhigh' : proxyLevel();
+    // 先按 /media 那一档取一次（顺带拿到实际音质），/media 接着用同一条链接
+    let fresh = true;
+    try { await refetch(song, { q, proxy: true, fresh: true }); fresh = false; } catch { /* 取不到就让 /media 自己重取 */ }
+    if (current !== song) return;
+    song.proxied = true;
+    setSrc(`/media/${song.id}?q=${q}${fresh ? '&fresh=1' : ''}`, at);
+    if (fresh) quality.paint(null, true);
     return audio.play().catch(() => {});
   }
   playNext();
@@ -634,17 +669,18 @@ function setSrc(url, at = 0) {
   if (at > 1) audio.addEventListener('loadedmetadata', () => { audio.currentTime = at; }, { once: true });
 }
 
-// 重取这首的直链（fresh：直链过期；q=exhigh：要 320k），音质标签按实际拿到的改
-async function refetch(song, { fresh = false, q = '' } = {}) {
-  const params = new URLSearchParams({ ...(fresh ? { fresh: '1' } : {}), ...(q ? { q } : {}) });
+// 重取这首的直链（fresh：直链过期；q：要哪一档，默认现在要的；proxy：退到 /media 用的那一档），音质标签按实际拿到的改
+async function refetch(song, { fresh = false, q = wanted(), proxy = false } = {}) {
+  const params = new URLSearchParams({ q, ...(fresh ? { fresh: '1' } : {}), ...(proxy ? { proxy: '1' } : {}) });
   const info = await api(`/api/song/${encodeURIComponent(song.id)}?${params}`);
   Object.assign(song, { direct: info.direct || '', url: info.url || song.url, level: info.level || '', bitrate: info.bitrate || 0, gain: info.gain ?? null, quality: info.quality || null });
-  if (current === song) paintQuality($('nowQuality'), song.quality);
+  if (!proxy) Object.assign(song, { asked: q, proxied: false });
+  if (current === song) quality.paint(song.quality, true);
 }
 
 // ---- 卡顿自动降档 ----
-// 放歌时缓冲（waiting，或 stalled 时手上已经没数据）超过 2 次，或者一次缓冲超过 5 秒：这次打开网页后面都要 320k。
-// 刚换歌 / 拖进度的那一下不算；按了暂停不算。
+// 放歌时缓冲（waiting，或 stalled 时手上已经没数据）超过 2 次，或者一次缓冲超过 5 秒：比这首实际要的档降一档，这次打开网页后面都按它；
+// 降完重新数，还卡再降。刚换歌 / 拖进度的那一下不算；按了暂停不算。在音质菜单里重新选一档就清掉。
 function onStall() {
   if (mode !== 'song' || !current?.reported || audio.paused || inStall) return;
   if (Date.now() - Math.max(srcChangedAt, seekedAt) < 1500) return;
@@ -659,26 +695,37 @@ audio.addEventListener('stalled', () => { if (audio.readyState < 3) onStall(); }
 audio.addEventListener('playing', () => { inStall = false; clearTimeout(stallTimer); });
 audio.addEventListener('seeking', () => { seekedAt = Date.now(); });
 
-// chosen：账号面板里自己选了流畅（不提示、不记成这次卡过）
-async function downgrade({ chosen = false } = {}) {
+// 比这首实际要的档降一档（已经最低就不动），记成这次打开网页的上限，正在放的从原位置换链
+async function downgrade() {
   clearTimeout(stallTimer);
-  if (!chosen) {
-    if (smooth) return;
-    smooth = true;
-    try { sessionStorage.setItem('dj_smooth', '1'); } catch { /* 存不了就只管这一页 */ }
-  }
+  stalls = 0;
+  inStall = false;
   const song = current;
-  if (!song || song.level !== 'lossless') return;
-  if (!chosen) setNotice('网络有点卡，这次先换成流畅（320k）');
+  if (!song) return;
+  const from = song.proxied ? proxyLevel() : (song.asked || wanted());
+  const next = stepDown(from);
+  if (next === from) return;
+  autoCap = next;
+  try { sessionStorage.setItem('dj_auto_q', next); } catch { /* 存不了就只管这一页 */ }
+  await swapCurrent();
+}
+
+// 正在放的这首按现在要的档换链，接着原来的进度放（口播时不换，轮到歌时 startSong 会按新档重取）
+async function swapCurrent() {
+  const song = current;
+  if (!song || mode !== 'song' || song.asked === wanted()) return quality.paint();
   const at = audio.currentTime || 0;
-  try { await refetch(song, { q: 'exhigh' }); } catch { return; }
+  try { await refetch(song); } catch (error) { return setNotice(error.message); }
   if (current !== song || mode !== 'song') return;
   const playing = !audio.paused;
   song.ladder = null;
-  setSrc(song.direct || song.url, at);
+  setSrc(srcOf(song), at);
   applyLoudness(song.gain);
   if (playing || wantPlay) audio.play().catch(() => {});
 }
+
+// 没有直链时走 /media（最高 CD）
+const srcOf = (song) => song.direct || `/media/${song.id}?q=${proxyLevel()}`;
 
 $('playBtn').addEventListener('click', () => {
   wantPlay = true;
@@ -775,10 +822,11 @@ async function renderHistory() {
 
 async function playFromHistory(song) {
   try {
-    const info = await api(`/api/song/${song.id}`);
+    const level = wanted();
+    const info = await api(`/api/song/${song.id}?q=${level}`);
     closeSheet('historyBackdrop');
     wantPlay = true;
-    queue.unshift({ ...song, ...info, say: '', voice: '' });
+    queue.unshift({ ...song, ...info, asked: level, say: '', voice: '' });
     playNext();
   } catch (error) { setNotice(error.message); closeSheet('historyBackdrop'); }
 }
@@ -813,21 +861,6 @@ $('pairBtn').addEventListener('click', async () => {
     $('pairShow').textContent = code;
     $('pairShow').classList.remove('hidden');
   } catch (error) { setNotice(error.message); }
-});
-
-// 选了就记在服务端（换设备也算）。选流畅：正在放的无损歌立刻换 320k；选无损：这次卡顿降档也不算了，从下一首起要无损
-$('qualitySeg').addEventListener('click', async (event) => {
-  const value = event.target.closest('button')?.dataset.value;
-  if (!value || value === me.quality) return;
-  try {
-    await api('/api/quality', { method: 'POST', body: { quality: value } });
-  } catch (error) { return setNotice(error.message); }
-  me.quality = value;
-  renderMe();
-  if (value === 'smooth') return downgrade({ chosen: true });
-  smooth = false;
-  stalls = 0;
-  try { sessionStorage.removeItem('dj_smooth'); } catch { /* 无痕窗口 */ }
 });
 
 // 聊天模式开关：记在这台设备上，默认开

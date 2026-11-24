@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 import { TALK_LEVELS } from './talk.js';
+import { LEVELS } from './quality-levels.js';
 
 // 大脑只留三家：家里盒子（本地）、Claude 订阅、DeepSeek 官方。
 // ChatGPT / Grok / Ornith / Agent2API 于 2026-10-31 下线；旧设置读进来时自动改到本地。
@@ -30,7 +31,8 @@ export const DEFAULT_LOCAL_LLM_MODEL = 'DeepSeek-V4.1-Flash-1017';
 const LEGACY_LOCAL_MODELS = ['qwen3.8-flash-next-unc', 'GLM-5.3-Flash-EXL3', 'flash-next'];
 const LOCAL_MODEL_RE = /^[A-Za-z0-9._:/-]+$/;
 export const TTS_PROVIDERS = ['pc5090', 'fish'];
-export const AUDIO_QUALITIES = ['standard', 'higher', 'exhigh', 'lossless', 'hires'];
+// 歌曲音质档位见 quality-levels.js（设置页、音质菜单、网易云取链接共用一份）
+export const AUDIO_QUALITIES = LEVELS;
 
 function envAudioQuality() {
   const level = String(config.ncm.level || '').trim();
@@ -298,6 +300,12 @@ function loadSettings() {
 }
 
 let runtimeSettings = loadSettings();
+
+// 现在要的歌曲音质档（设置里的 playback.quality，不合法就是极高）
+export function audioQuality() {
+  const quality = getSettings().playback?.quality;
+  return AUDIO_QUALITIES.includes(quality) ? quality : 'exhigh';
+}
 
 export function getSettings() {
   return clone(runtimeSettings);

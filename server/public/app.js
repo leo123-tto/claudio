@@ -12,6 +12,7 @@ import { createVoice, introLine, recAsk } from './voice.js';
 import { createRecommender, matchFriend, mountFriendRoutes, parseRecText } from './friends-routes.js';
 import { oneSentence } from '../drive.js';
 import { readToneExtension } from '../tone.js';
+import { isLevel } from '../quality-levels.js';
 import { TALK_LEVELS, applyTalk, createTalkTracker, effectiveTalk, hourKeyOf, speakReasons, talkAck, talkFromText } from '../talk.js';
 import { appVersion } from '../version.js';
 import { chatWhen } from '../chat-mode.js';
@@ -23,10 +24,19 @@ const BEIJING = 8 * 3600_000;
 // 账号面板里的设置：清空记忆时留着（不算记忆）
 const SETTING_KEYS = ['quality', 'adult', 'talk'];
 
-// 音质：绑了网易云且是会员默认要无损（只到 CD 级，见 ncm-public.js 的 songUrl），其余要 exhigh（320k，没绑定的免费歌也能拿到）；
-// 账号面板选了「流畅」，或这次打开网页卡顿自动降档（smooth，网页每次请求带上）也要 320k。没有这档网易云自己降
-export function qualityFor(memory, cookie, smooth = false) {
-  return cookie && memory?.account?.vip && !smooth && memory?.quality !== 'smooth' ? 'lossless' : 'exhigh';
+// 音质：网页每次请求带上这台设备在音质菜单里选的档（已含卡顿自动降档，见 web/public.js），谁都能选高档（没绑定的用运营者配置的默认音源，
+// 2026-11-24 协调方定：放开）。没带就是默认：绑了网易云的会员要无损（只到 CD 级，见 ncm-public.js 的 songUrl），以前在账号面板选过
+// 「流畅」的和其余的人 320k。没有这档网易云自己降。旧网页带 smooth:true / q=exhigh，照旧当 320k。
+export function qualityFor(memory, cookie, asked = '') {
+  if (asked === true) return 'exhigh';
+  if (isLevel(asked)) return asked;
+  return cookie && memory?.account?.vip && memory?.quality !== 'smooth' ? 'lossless' : 'exhigh';
+}
+// 请求里要的档：新网页带 quality，旧网页带 smooth
+export function askedLevel(source = {}) {
+  if (isLevel(source.quality)) return source.quality;
+  if (isLevel(source.q)) return source.q;
+  return source.smooth === true || source.smooth === '1' ? 'exhigh' : '';
 }
 
 // 浏览器直接去音乐 CDN 取（国内 CDN 首字节几十毫秒；经家里盒子和 Cloudflare 隧道要绕美国，1–2 秒、带宽忽高忽低）。
@@ -282,6 +292,7 @@ export function createPublicApp({
       canAsk: members.bound(m.id) || Boolean(ncm.borrowsOwner),
       nickname: mem.account?.nickname || '',
       vip: Boolean(mem.account?.vip),
+      // 以前账号面板选过「流畅」的，音质菜单默认 320k；现在音质记在各台设备上（见 web/public.js）
       quality: mem.quality === 'smooth' ? 'smooth' : 'lossless',
       prefs: mem.prefs,
       notesCount: (mem.notes || []).filter((note) => note?.status !== 'muted').length,
@@ -427,8 +438,8 @@ export function createPublicApp({
   }
 
   // 自动续播不搜歌：绑定的人按「红心 4 : 推荐 4 : 新歌 2」混着来（见 mix.js），没绑定的从榜单里的免费歌挑（都是已知 id，只问直链）
-  async function autoSongs(m, memory, cookie, smooth) {
-    const level = qualityFor(memory, cookie, smooth);
+  async function autoSongs(m, memory, cookie, asked) {
+    const level = qualityFor(memory, cookie, asked);
     const playById = (song, options) => ncm.playById(song, options);
     let picked;
     if (cookie) {
@@ -469,12 +480,12 @@ export function createPublicApp({
 
   // 好友推荐的歌：这批第一首插一首（隔 10 分钟以上，见 friends.next）。按这位朋友自己的登录态 / 档位取；
   // 放不了就标出来不再给；网易云忙就当这次没给，过半小时再给。
-  async function friendSong(m, memory, cookie, smooth) {
+  async function friendSong(m, memory, cookie, asked) {
     if (!friends) return null;
     let rec;
     try { rec = friends.next(m.id); } catch { return null; }
     if (!rec) return null;
-    const level = qualityFor(memory, cookie, smooth);
+    const level = qualityFor(memory, cookie, asked);
     try {
       const song = await ncm.playById({ id: rec.song.id, title: rec.song.title, artist: rec.song.artist, duration: rec.song.duration, cover: rec.song.cover },
         { cookie, memberId: m.id, level });
@@ -561,7 +572,7 @@ export function createPublicApp({
     const text = String(req.body?.text || '').trim().slice(0, 200);
     const auto = !text;
     const drive = req.body?.drive === true; // 驾驶模式：DJ 只说一句
-    const smooth = req.body?.smooth === true; // 这次打开网页卡过，降到 320k
+    const asked = askedLevel(req.body || {}); // 这台设备选的音质（含卡顿自动降档）
     const chatMode = !auto && req.body?.chatMode === true && config.chat.enabled; // 聊天模式（账号面板里的开关，默认开）
     const cookie = members.getCookie(m.id);
     // 「少说点」「今天别打扰我」这类话：记下口播频率，回一句确认；不打大脑、不扣次数、不记进对话
@@ -584,8 +595,8 @@ export function createPublicApp({
       const quota = await hub.consume(m.id, auto ? 'song' : 'chat');
       const memory = members.memory(m.id);
       if (auto) {
-        const fromFriend = await friendSong(m, memory, cookie, smooth);
-        const picked = await autoSongs(m, memory, cookie, smooth);
+        const fromFriend = await friendSong(m, memory, cookie, asked);
+        const picked = await autoSongs(m, memory, cookie, asked);
         if (fromFriend) {
           picked.songs = [fromFriend, ...picked.songs.filter((s) => s.id !== fromFriend.id)];
           picked.notice = '';
@@ -612,7 +623,7 @@ export function createPublicApp({
         reply = { say: '', intent: 'recommend', play: await fallbackCandidates(text, { ...memory, cookie, memberId: m.id }), memoryCandidates: [] };
       }
       let picked = { songs: [], notice: '' };
-      if (reply.intent === 'recommend') picked = await pickSongs(reply.play, { cookie, memberId: m.id, bound: true, level: qualityFor(memory, cookie, smooth) });
+      if (reply.intent === 'recommend') picked = await pickSongs(reply.play, { cookie, memberId: m.id, bound: true, level: qualityFor(memory, cookie, asked) });
       // 推荐了但一首都放不了，就别让 DJ 说「来了」，只给提示
       const nothing = reply.intent === 'recommend' && !picked.songs.length;
       const fullSay = nothing ? '' : (degraded ? 'DJ 这会儿有点忙，先按你说的直接找了两首。' : reply.say);
@@ -690,15 +701,24 @@ export function createPublicApp({
     } catch (error) { sendError(res, error); }
   });
 
-  // 从「最近听过」点回去放；直链过期重取（fresh=1）；卡顿后要 320k（q=exhigh）
+  // 从「最近听过」点回去放；直链过期重取（fresh=1）；换音质 / 卡顿降档按 q 要；proxy=1 是退到 /media 时那一档（封到 CD）
   app.get('/api/song/:id', auth, async (req, res) => {
     const id = String(req.params.id);
     if (!SONG_ID.test(id)) return res.status(400).json({ error: 'invalid' });
     try {
-      const info = await media.meta(req.member.id, parseSongId(id), { smooth: req.query.q === 'exhigh', fresh: req.query.fresh === '1' });
+      const info = await media.meta(req.member.id, parseSongId(id), { asked: askedLevel(req.query), proxied: req.query.proxy === '1', fresh: req.query.fresh === '1' });
       if (!info) return res.status(404).json({ error: 'gone', message: '这首现在放不了了' });
       const { url: cdn, ...rest } = info;
       res.json({ id: parseSongId(id), url: `/media/${id}`, ...rest, ...(directUrl(cdn) ? { direct: directUrl(cdn) } : {}) });
+    } catch (error) { sendError(res, error); }
+  });
+
+  // 音质菜单：这首能要哪几档（拿不准回 null，网页就不标灰）
+  app.get('/api/song/:id/levels', auth, async (req, res) => {
+    const id = String(req.params.id);
+    if (!SONG_ID.test(id)) return res.status(400).json({ error: 'invalid' });
+    try {
+      res.json({ levels: await ncm.levels(parseSongId(id), { cookie: members.getCookie(req.member.id), memberId: req.member.id }) });
     } catch (error) { sendError(res, error); }
   });
 
@@ -761,13 +781,6 @@ export function createPublicApp({
     members.clearMemory(req.member.id);
     if (Object.keys(kept).length) members.saveMemory(req.member.id, { ...members.memory(req.member.id), ...kept }); // 音质、本地语气扩展、口播频率是设置，不算记忆
     res.json({ ok: true });
-  });
-
-  // 账号面板的音质：流畅（320k）/ 无损（CD），记在这个人的记忆里，换设备也算
-  app.post('/api/quality', auth, (req, res) => {
-    const quality = req.body?.quality === 'smooth' ? 'smooth' : 'lossless';
-    members.saveMemory(req.member.id, { ...members.memory(req.member.id), quality });
-    res.json({ ok: true, quality });
   });
 
   // 账号面板：本地语气扩展开关（默认关；本容器数据目录里有 tone-extension.md 才有这个开关）和口播频率。都记在这个人自己的记忆里

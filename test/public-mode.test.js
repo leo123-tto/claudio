@@ -8,7 +8,8 @@ import http from 'node:http';
 import { createNcmClient, cookieKey, NcmBusyError, aboveCd } from '../server/public/ncm-public.js';
 import { createMemberStore, encrypt, decrypt, parseVaultKey, MEMORY_IDLE_MS } from '../server/public/members.js';
 import { createGate, parseEngineLoad, createBrain, buildPrompt, normalizeReply, publicTone, relationStage } from '../server/public/brain.js';
-import { createPublicApp, syncWithHub, parseCookies, clientIp, deviceLabel, qualityFor, directUrl, songView } from '../server/public/app.js';
+import { createPublicApp, syncWithHub, parseCookies, clientIp, deviceLabel, qualityFor, askedLevel, directUrl, songView } from '../server/public/app.js';
+import { proxyLevel } from '../server/public/media.js';
 import { HubError } from '../server/public/hub-client.js';
 
 const KEY = parseVaultKey('11'.repeat(32));
@@ -589,9 +590,6 @@ test('网易云：扫码后轮询状态 3 分钟不被限速卡住，也不占�
 });
 
 test('音质：会员要无损、拿不到再要 exhigh；gain 带回来，试听占位的 gain 不算', async () => {
-  assert.equal(qualityFor({ account: { vip: true } }, 'MUSIC_U=a'), 'lossless');
-  assert.equal(qualityFor({ account: { vip: false } }, 'MUSIC_U=a'), 'exhigh');
-  assert.equal(qualityFor({ account: { vip: true } }, ''), 'exhigh');
   const asked = [];
   const ncm = createNcmClient({
     base: 'http://ncm.test',
@@ -626,13 +624,79 @@ function flacHead(sampleRate, bits) {
   return { ok: true, status: 206, headers: new Headers(), body: new Response(b).body };
 }
 
-test('音质：流畅（账号面板）或这次卡过（smooth）都要 320k；没绑定的一直 320k', () => {
+test('音质：默认会员无损（CD）、其余 320k；设备选的档照给（没绑定也行）；以前选过流畅的默认 320k；旧网页 smooth 当 320k', () => {
   const vip = { account: { vip: true } };
   assert.equal(qualityFor(vip, 'MUSIC_U=a'), 'lossless');
+  assert.equal(qualityFor({ account: { vip: false } }, 'MUSIC_U=a'), 'exhigh');
+  assert.equal(qualityFor(vip, ''), 'exhigh');
+  assert.equal(qualityFor({}, ''), 'exhigh');
+  assert.equal(qualityFor({}, '', 'hires'), 'hires');
+  assert.equal(qualityFor(vip, 'MUSIC_U=a', 'jymaster'), 'jymaster');
+  assert.equal(qualityFor(vip, 'MUSIC_U=a', 'standard'), 'standard');
+  assert.equal(qualityFor(vip, 'MUSIC_U=a', 'nope'), 'lossless');
+  assert.equal(qualityFor({}, '', 'nope'), 'exhigh');
   assert.equal(qualityFor(vip, 'MUSIC_U=a', true), 'exhigh');
   assert.equal(qualityFor({ ...vip, quality: 'smooth' }, 'MUSIC_U=a'), 'exhigh');
-  assert.equal(qualityFor({ ...vip, quality: 'lossless' }, 'MUSIC_U=a'), 'lossless');
-  assert.equal(qualityFor(vip, ''), 'exhigh');
+  assert.equal(qualityFor({ ...vip, quality: 'smooth' }, 'MUSIC_U=a', 'hires'), 'hires');
+  assert.equal(askedLevel({ quality: 'hires', smooth: true }), 'hires');
+  assert.equal(askedLevel({ smooth: true }), 'exhigh');
+  assert.equal(askedLevel({ q: 'exhigh' }), 'exhigh');
+  assert.equal(askedLevel({ q: 'sky' }), '');
+  assert.equal(proxyLevel('hires'), 'lossless');
+  assert.equal(proxyLevel('jymaster'), 'lossless');
+  assert.equal(proxyLevel('exhigh'), 'exhigh');
+});
+
+test('音质：Hi-Res / 超清母带不封到 CD；超清母带退成环绕声版时改要 Hi-Res', async () => {
+  const asked = [];
+  const ncm = createNcmClient({
+    base: 'http://ncm.test',
+    sleep: async () => {},
+    fetchFn: async (url) => {
+      const level = new URL(url).searchParams.get('level');
+      asked.push(level);
+      if (level === 'jymaster') return jsonRes({ data: [{ url: 'http://m7.music.126.net/s.flac', level: 'jyeffect', br: 3042043, type: 'flac', sr: 96000 }] });
+      return jsonRes({ data: [{ url: 'http://m7.music.126.net/h.flac', level: 'hires', br: 2832352, type: 'flac', sr: 88200 }] });
+    },
+  });
+  const audio = await ncm.songUrl(1, { level: 'jymaster', cookie: 'MUSIC_U=a' });
+  assert.deepEqual(asked.filter((l) => l), ['jymaster', 'hires']);
+  assert.equal(audio.level, 'hires');
+  assert.equal(audio.url, 'https://m7.music.126.net/h.flac');
+});
+
+test('音质菜单：按 privileges 算这首能要哪几档；备用音源固定几档；放不了回 null', async () => {
+  const { levelsFromPrivilege, ALT_LEVELS, stepDown } = await import('../server/quality-levels.js');
+  const rates = (...r) => r.map((rate) => ({ rate }));
+  // 老板的会员：能到 jyeffect，没 Hi-Res 的歌没有 Hi-Res
+  assert.deepEqual(levelsFromPrivilege({ maxBrLevel: 'jymaster', plLevel: 'jyeffect', chargeInfoList: rates(128000, 192000, 320000, 999000) }),
+    ['standard', 'higher', 'exhigh', 'lossless']);
+  assert.deepEqual(levelsFromPrivilege({ maxBrLevel: 'jymaster', plLevel: 'jyeffect', chargeInfoList: rates(128000, 192000, 320000, 999000, 1999000) }),
+    ['standard', 'higher', 'exhigh', 'lossless', 'hires']);
+  assert.deepEqual(levelsFromPrivilege({ maxBrLevel: 'jymaster', plLevel: 'jymaster', chargeInfoList: rates(128000, 320000, 999000, 1999000) }),
+    ['standard', 'exhigh', 'lossless', 'hires', 'jymaster']);
+  // 非会员：只到 320k
+  assert.deepEqual(levelsFromPrivilege({ maxBrLevel: 'lossless', plLevel: 'exhigh', chargeInfoList: rates(128000, 192000, 320000, 999000) }),
+    ['standard', 'higher', 'exhigh']);
+  assert.equal(levelsFromPrivilege({ maxBrLevel: 'lossless', plLevel: 'none' }), null);
+  assert.equal(levelsFromPrivilege(null), null);
+  assert.deepEqual(levelsFromPrivilege({ maxBrLevel: 'lossless', plLevel: 'lossless' }), ['standard', 'higher', 'exhigh', 'lossless']);
+  assert.ok(ALT_LEVELS.includes('lossless') && !ALT_LEVELS.includes('jymaster'));
+  assert.equal(stepDown('hires'), 'lossless');
+  assert.equal(stepDown('standard'), 'standard');
+  const calls = [];
+  const ncm = createNcmClient({
+    base: 'http://ncm.test',
+    sleep: async () => {},
+    fetchFn: async (url) => {
+      calls.push(new URL(url).pathname);
+      return jsonRes({ songs: [], privileges: [{ id: 5, maxBrLevel: 'hires', plLevel: 'hires', chargeInfoList: rates(128000, 320000, 999000, 1999000) }] });
+    },
+  });
+  assert.deepEqual(await ncm.levels(5, { cookie: 'MUSIC_U=a' }), ['standard', 'exhigh', 'lossless', 'hires']);
+  assert.deepEqual(await ncm.levels(5, { cookie: 'MUSIC_U=a' }), ['standard', 'exhigh', 'lossless', 'hires']);
+  assert.deepEqual(calls, ['/song/detail']);
+  assert.deepEqual(await ncm.levels('kw123', { cookie: 'MUSIC_U=a' }), ALT_LEVELS);
 });
 
 test('CD 级判定：FLAC 24 bit / 96 kHz / Hi-Res 档 / 没文件头但码率超 1411k 都算超', () => {
@@ -749,7 +813,7 @@ test('音频同源代理：网页只拿到 /media/<id>；透传 Range；直链�
   } finally { t.close(); }
 });
 
-test('音质设置：账号面板选流畅记下来（清空记忆不丢）；卡过（smooth / q=exhigh）按 320k 取；歌带 https 直链', async () => {
+test('音质：按网页带的档取（q / quality），旧网页 smooth 当 320k；退到 /media 封到 CD；歌带 https 直链', async () => {
   const levels = [];
   const t = await startApp({
     ncm: {
@@ -769,20 +833,30 @@ test('音质设置：账号面板选流畅记下来（清空记忆不丢）；�
     assert.equal(song.data.url, '/media/60');
     assert.equal(song.data.direct, 'https://m.music.126.net/60.flac');
     await t.req('/api/song/61?q=exhigh', { cookie });
-    assert.deepEqual(levels, ['url:lossless', 'url:exhigh']);
+    await t.req('/api/song/63?q=hires', { cookie });
+    await t.req('/api/song/64?q=hires&proxy=1', { cookie });
+    await t.req('/api/song/65?q=sky', { cookie });
+    assert.deepEqual(levels, ['url:lossless', 'url:exhigh', 'url:hires', 'url:lossless', 'url:lossless']);
+    levels.length = 0;
     const auto = await t.req('/api/chat', { method: 'POST', body: { text: '', smooth: true }, cookie });
     assert.ok(auto.data.songs.length);
     assert.ok(auto.data.songs.every((s) => s.direct.startsWith('https://')));
-    assert.ok(levels.slice(2).every((l) => l.endsWith(':exhigh')));
-    // 流畅：记下来，清空记忆也还在
-    assert.equal((await t.req('/api/quality', { method: 'POST', body: { quality: 'smooth' }, cookie })).data.quality, 'smooth');
-    await t.req('/api/memory/clear', { method: 'POST', cookie });
+    assert.ok(levels.length && levels.every((l) => l.endsWith(':exhigh')));
+    levels.length = 0;
+    const hi = await t.req('/api/chat', { method: 'POST', body: { text: '', quality: 'hires' }, cookie });
+    assert.ok(hi.data.songs.length);
+    assert.ok(levels.length && levels.every((l) => l.endsWith(':hires')));
+    // /media 是退路：选了 Hi-Res 也只取到 CD 档
+    levels.length = 0;
+    await t.req('/media/66?q=hires', { cookie });
+    assert.deepEqual(levels, ['url:lossless']);
+    // 音质记在设备上，账号面板那个接口没了；以前选过流畅的，默认 320k
+    assert.equal((await t.req('/api/quality', { method: 'POST', body: { quality: 'smooth' }, cookie })).status, 404);
+    t.members.saveMemory('mem_00000001', { ...t.members.memory('mem_00000001'), quality: 'smooth' });
     assert.equal((await t.req('/api/me', { cookie })).data.quality, 'smooth');
     levels.length = 0;
     await t.req('/api/song/62', { cookie });
     assert.deepEqual(levels, ['url:exhigh']);
-    await t.req('/api/quality', { method: 'POST', body: { quality: 'lossless' }, cookie });
-    assert.equal((await t.req('/api/me', { cookie })).data.quality, 'lossless');
     // 直链只放行 https 媒体
     const csp = (await t.req('/api/me', { cookie })).headers.get('content-security-policy');
     assert.match(csp, /media-src 'self' blob: https:;/);

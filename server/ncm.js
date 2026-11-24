@@ -6,7 +6,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ncmQuality, withFlacHeader } from './audio-quality.js';
 import { config } from './config.js';
-import { getSettings } from './settings.js';
+import { audioQuality, getSettings } from './settings.js';
+import { ALT_LEVELS, levelsFromPrivilege } from './quality-levels.js';
 import { factStore, parseSongFacts } from './song-meta.js';
 import { createTimeoutSignal } from './llm/openai-chat.js';
 import { reportCooldown, requestSlot, startSlotServer } from './ncm-shared.js';
@@ -93,7 +94,7 @@ function grantRemote() {
   return { ok: true };
 }
 export function startSharedLimitServer(address = config.ncm.sharedServe, { tts = null } = {}) {
-  const guest = { search: guestSearch, songUrl: guestSongUrl, find: guestFind, lyric: guestLyric };
+  const guest = { search: guestSearch, songUrl: guestSongUrl, find: guestFind, lyric: guestLyric, levels: guestLevels };
   return address ? startSlotServer(address, { grant: grantRemote, cool: coolSearch, tts, guest }) : null;
 }
 export const grantRemoteForTests = grantRemote;
@@ -220,9 +221,24 @@ function rememberSearch(key, data) {
 }
 
 export function currentAudioQuality() {
-  const quality = getSettings().playback?.quality;
-  return ['standard', 'higher', 'exhigh', 'lossless', 'hires'].includes(quality) ? quality : 'exhigh';
+  return audioQuality();
 }
+
+// 音质菜单：这首能要哪几档（见 quality-levels.js）。只在网页打开菜单时问一次，按 id 记 6 小时。拿不准回 null
+const levelCache = new Map();
+export async function songLevels(id, options = {}) {
+  if (sources.isAltId(id)) return ALT_LEVELS;
+  const key = String(id);
+  const hit = levelCache.get(key);
+  if (hit && hit.until > Date.now()) return hit.levels;
+  const detail = await call('/song/detail', { ids: key }, options);
+  const levels = levelsFromPrivilege(detail?.privileges?.find((p) => String(p?.id) === key) || detail?.privileges?.[0]);
+  levelCache.set(key, { levels, until: Date.now() + 6 * 3600_000 });
+  if (levelCache.size > 2000) levelCache.delete(levelCache.keys().next().value);
+  return levels;
+}
+
+const SURROUND = new Set(['jyeffect', 'sky']);
 
 // 只问网易云。只有试听（freeTrialInfo）也当拿不到，trial 标出来给公用版看。
 async function ncmSongUrl(id, level, options) {
@@ -231,6 +247,8 @@ async function ncmSongUrl(id, level, options) {
   // 2026-11-22 起网易云对默认的 eapi 回 -460「网络环境存在风险」（Mac 和盒子都是），weapi 正常，登录后音质也照旧。
   const data = await call('/song/url/v1', { id, level, crypto: 'weapi' }, options);
   const item = data?.data?.[0];
+  // 要超清母带但账号不够时，网易云退给环绕声处理版（jyeffect / sky），不是原声：改要 Hi-Res
+  if (level === 'jymaster' && SURROUND.has(item?.level)) return ncmSongUrl(id, 'hires', options);
   if (!item?.url) return null;
   const peak = Number(item.peak) || 0;
   const gain = Number(item.gain);
@@ -490,6 +508,11 @@ export function guestSongUrl({ id, level = 'exhigh', title = '', artist = '', du
     if (audio && !audio.trial) return audio;
     return guestFind({ ncmId: id, title, artist, duration }, { level, signal });
   });
+}
+
+// 音质菜单：给没绑定的人用：这首按本实例的账号能要哪几档
+export function guestLevels(id, { signal } = {}) {
+  return withNcmSource('guest', () => songLevels(id, { signal }));
 }
 
 // 只找备用音源（公用版已绑定的人自己的登录态放不了时用）

@@ -42,7 +42,8 @@ export async function resolveEpisodeSongs(candidates, { resolve, signal, timeout
   }
 }
 
-export async function refreshEpisodeUrls(episode, { cache, songUrl, signal, timeout = 3000 } = {}) {
+// level：现在要的音质档（给了就记到 meta.asked，换档后据此判断要不要重取）
+export async function refreshEpisodeUrls(episode, { cache, songUrl, signal, timeout = 3000, level } = {}) {
   signal?.throwIfAborted();
   const controller = new AbortController();
   const abort = () => { controller.abort(signal.reason); finish(); };
@@ -54,12 +55,18 @@ export async function refreshEpisodeUrls(episode, { cache, songUrl, signal, time
   try {
     await Promise.race([Promise.all(episode.queue.filter((item) => item.type === 'song').map(async (item) => {
       const id = String(item.meta?.id || '');
-      if (cache.has(id)) { item.url = `/media/${id}`; return; }
+      if (cache.has(id)) {
+        item.url = `/media/${id}`;
+        const cached = level && cache.info?.(id);
+        if (cached) { item.meta.asked = level; if (cached.quality) item.meta.quality = cached.quality; }
+        return;
+      }
       try {
-        const fresh = await songUrl(id, undefined, { signal: controller.signal });
+        const fresh = await songUrl(id, level, { signal: controller.signal });
         if (!closed && !controller.signal.aborted && fresh?.url) {
           item.url = fresh.url;
           item.meta.remoteUrl = fresh.url;
+          if (level) item.meta.asked = level;
           // 换了直链就按新链接标音质；新链接没给就不标，免得留着旧的
           if (fresh.quality) item.meta.quality = fresh.quality; else delete item.meta.quality;
         }

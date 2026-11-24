@@ -8,6 +8,7 @@
 //   经 Cloudflare 隧道绕美国，带宽忽高忽低，2 倍时一掉速就卡）；每人同时最多 3 路，断开就停上游。
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { isLevel, minLevel } from '../quality-levels.js';
 
 const URL_TTL = 10 * 60_000;
 const BURST = 2 * 1024 * 1024;
@@ -30,6 +31,10 @@ export function throttle(source, { bytesPerSec, burst = BURST, now = () => Date.
     }
   })());
 }
+
+// /media 是退路，音频经家里上行和隧道：最高到 CD 级无损（lossless 在 ncm-public.js 里封到 16 bit / 48 kHz），选了 Hi-Res 也一样
+export const proxyLevel = (level) => minLevel(level, 'lossless');
+const askedOf = (query) => (isLevel(query.q) ? query.q : '');
 
 export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, maxStreams = 3, now = () => Date.now(), log = () => {} }) {
   const urls = new Map(); // `${memberId}|${id}|${level}` -> { url, bitrate, until }
@@ -58,7 +63,7 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
     const id = String(req.params.id);
     if (!/^(\d{1,15}|[a-z]{2,4}\d{1,20})$/.test(id)) return res.status(400).end();
     const memberId = req.member.id;
-    const level = qualityFor(members.memory(memberId), members.getCookie(memberId), req.query.q === 'exhigh');
+    const level = proxyLevel(qualityFor(members.memory(memberId), members.getCookie(memberId), askedOf(req.query)));
     const open = streams.get(memberId) || 0;
     if (open >= maxStreams) return res.status(429).end();
     streams.set(memberId, open + 1);
@@ -99,9 +104,11 @@ export function createMediaProxy({ ncm, members, qualityFor, fetchFn = fetch, ma
     }
   }
 
-  // 从「最近听过」点回去放、直链过期重取、卡顿降到 320k：先取一次直链（顺带拿到响度和档位），网页直连或从 /media 取
-  async function meta(memberId, id, { smooth = false, fresh = false } = {}) {
-    const level = qualityFor(members.memory(memberId), members.getCookie(memberId), smooth);
+  // 从「最近听过」点回去放、直链过期重取、换音质 / 卡顿降档：先取一次直链（顺带拿到响度和档位），网页直连或从 /media 取。
+  // proxied：网页要退到 /media 了，按 /media 那一档（封到 CD）取，页面标的就是 /media 实际给的
+  async function meta(memberId, id, { asked = '', proxied = false, fresh = false } = {}) {
+    const wanted = qualityFor(members.memory(memberId), members.getCookie(memberId), asked);
+    const level = proxied ? proxyLevel(wanted) : wanted;
     const entry = await lookup(memberId, id, level, fresh);
     return entry && { gain: entry.gain, level: entry.level, bitrate: entry.bitrate, url: entry.url, ...(entry.quality ? { quality: entry.quality } : {}) };
   }

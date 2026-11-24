@@ -23,7 +23,8 @@ const visualSource = [
   visualModule('lyrics', 'parseLrc, createLyricView, startLyricClock, LYRIC_LEAD'),
   visualModule('subtitle', 'typewriter, renderStatic'),
   visualModule('window-mode', 'startWindowMode, toggleFullscreen, onModeChange, createIdleHider'),
-  visualModule('ui', 'createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality'),
+  visualModule('ui', 'createCovers, createChatStrip, wireImmersive, BUBBLE_LINE, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality, qualityLabel'),
+  visualModule('quality-menu', 'createQualityMenu'),
   visualModule('voice-stream', 'attachVoice'),
   visualModule('handoff', 'deviceIdentity'),
 ].join('\n');

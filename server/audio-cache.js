@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { sources } from './sources.js';
+import { audioQuality } from './settings.js';
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const MAX_ENTRY_BYTES = 80 * 1024 * 1024;
@@ -28,6 +29,9 @@ export function createAudioCache({
   fetch: fetchAudio = globalThis.fetch,
   maxBytes = 400 * 1024 * 1024,
   now = Date.now,
+  // 现在要的音质档（个人版设置里的 playback.quality）。给了的话，缓存里别的档的文件 has() 不认、下载时换掉；
+  // 以前没记档的文件按 exhigh 算（2026-11-24 之前盒子上一直是极高）。/media 照样能放旧档的文件，免得网页手里的地址 404。
+  level = null,
 } = {}) {
   const directory = path.resolve(root);
   const pinned = new Set();
@@ -48,8 +52,14 @@ export function createAudioCache({
         const at = new Date(now());
         fs.utimesSync(file, at, at);
       }
-      return { id, url: `/media/${id}`, file, size: stat.size, contentType: metadata.contentType || 'audio/mpeg' };
+      return { id, url: `/media/${id}`, file, size: stat.size, contentType: metadata.contentType || 'audio/mpeg', level: metadata.level || 'exhigh', quality: metadata.quality || null };
     } catch { return null; }
+  }
+
+  // 缓存里这首是不是现在要的档
+  function current(value, touch = false) {
+    const entry = info(value, touch);
+    return entry && (!level || entry.level === level()) ? entry : null;
   }
 
   function prune({ keep = '' } = {}) {
@@ -74,8 +84,9 @@ export function createAudioCache({
     const id = mediaId(song?.id);
     if (!id || String(song.id) !== id) throw new TypeError('音频 ID 无效');
     signal?.throwIfAborted();
-    const cached = info(id, true);
+    const cached = current(id, true);
     if (cached) return cached;
+    const wanted = song.level || level?.() || '';
     let url = String(song?.url || '');
     let response;
     for (let hop = 0; hop <= 3; hop += 1) {
@@ -135,7 +146,7 @@ export function createAudioCache({
       if (size < 1000 || (expected !== null && expected !== size)) throw new Error('这首音频下载不完整');
       await handle.close();
       handle = null;
-      fs.writeFileSync(metaTemp, JSON.stringify({ size, contentType }));
+      fs.writeFileSync(metaTemp, JSON.stringify({ size, contentType, ...(wanted ? { level: wanted } : {}), ...(song.quality ? { quality: song.quality } : {}) }));
       fs.renameSync(temp, fileFor(id));
       fs.renameSync(metaTemp, metaFor(id));
       const result = info(id, true);
@@ -191,7 +202,7 @@ export function createAudioCache({
     },
     info(value) { return info(value); },
     resolve(value) { return info(value, true)?.file || null; },
-    has(value) { return Boolean(info(value)); },
+    has(value) { return Boolean(current(value)); },
     pin(ids = []) {
       pinned.clear();
       for (const value of ids) { const id = mediaId(value); if (id) pinned.add(id); }
@@ -201,4 +212,4 @@ export function createAudioCache({
   };
 }
 
-export const audioCache = createAudioCache();
+export const audioCache = createAudioCache({ level: audioQuality });
