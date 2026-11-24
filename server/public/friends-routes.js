@@ -110,6 +110,11 @@ export function mountFriendRoutes(app, { auth, friends, recommend, members, fail
     return { rec: recommend(req.member.id, String(req.body?.to || ''), song, req.body?.note || '') };
   }));
   r.post('/like', wrap((req) => ({ rec: friends.like(req.member.id, String(req.body?.rec || '')) })));
+  // 问了没听：网页在等待窗口关掉后调，把这条从「待播」挪到「暂存」。
+  // 不是彻底不要——用户之后问「刚才谁推荐了什么」还找得回来（dropped 列表）。
+  r.post('/drop', wrap((req) => ({ rec: friends.drop(req.member.id, String(req.body?.rec || '')) })));
+  r.post('/recover', wrap((req) => ({ rec: friends.recover(req.member.id, String(req.body?.rec || '')) })));
+  r.get('/dropped', wrap((req) => ({ dropped: friends.droppedList(req.member.id) })));
   app.use('/api/friends', r);
 }
 
@@ -146,6 +151,9 @@ export function createOwnerApp({ friends, recommend, words }) {
   app.post('/owner/like', wrap((req) => ({ rec: friends.like(OWNER_ID, rec(req)) })));
   app.post('/owner/like-song', wrap((req) => ({ rec: friends.likeSong(OWNER_ID, String(req.body?.songId ?? '')) })));
   app.post('/owner/unplayable', wrap((req) => { friends.unplayable(OWNER_ID, rec(req)); }));
+  app.post('/owner/drop', wrap((req) => ({ rec: friends.drop(OWNER_ID, rec(req)) })));
+  app.post('/owner/recover', wrap((req) => ({ rec: friends.recover(OWNER_ID, rec(req)) })));
+  app.get('/owner/dropped', wrap(() => ({ dropped: friends.droppedList(OWNER_ID) })));
   app.use((req, res) => res.status(404).json({ error: 'not_found' }));
   return app;
 }

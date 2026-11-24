@@ -51,7 +51,7 @@ function paintNow() {
 
 // ---- 好友面板 ----
 const SENT = { sent: '已送达', played: '已播', expired: '过期了', unplayable: '对方放不了' };
-const RECEIVED = { new: '待播', played: '已播', expired: '过期了', unplayable: '放不了' };
+const RECEIVED = { new: '待播', played: '已播', expired: '过期了', unplayable: '放不了', dropped: '先存着' };
 
 function songLine(rec, extra) {
   const li = el('li');
@@ -89,7 +89,8 @@ function render() {
   inbox.textContent = '';
   for (const r of v.inbox) {
     const li = songLine(r, `${r.from.name} · ${RECEIVED[r.status] || ''}`);
-    if (r.liked) li.append(el('span', 'liked', '♥'));
+    if (r.status === 'dropped') li.append(button('听', 'btn-line', async () => { await act('recover', { rec: r.id }); }));
+    else if (r.liked) li.append(el('span', 'liked', '♥'));
     else if (r.status !== 'unplayable') li.append(button('好听', 'btn-line', async () => { await act('like', { rec: r.id }); }));
     inbox.append(li);
   }

@@ -6,12 +6,17 @@ export function transcriptText(payload) {
   return String(payload.text || payload.transcript || '').replace(/\s+/g, ' ').trim();
 }
 
+// 识别服务在、只是没听出字（网页的推荐问答把它当「没出声」，别的错当「听不了」）
+function unclear() {
+  return Object.assign(new Error('没听清，再说一次'), { unclear: true });
+}
+
 export function decodeVoiceAudio(audioBase64) {
   const raw = String(audioBase64 || '');
-  if (!raw) throw new Error('没听清，再说一次');
+  if (!raw) throw unclear();
   if (raw.length > 6_000_000) throw new Error('这句话太长了，说短一点');
   const bytes = Buffer.from(raw, 'base64');
-  if (bytes.length < 800 || bytes.length > 4_000_000) throw new Error('没听清，再说一次');
+  if (bytes.length < 800 || bytes.length > 4_000_000) throw unclear();
   return bytes;
 }
 
@@ -36,7 +41,7 @@ export async function transcribeAudio(bytes, mime = 'audio/webm', { fetchImpl = 
   // Mac mini 连得上就以它为准：没听出字直接说没听清，不去叫 5090（会拉起 ASR 档、把口播的 TTS 挤下卡）。
   const fast = await transcribeFast(bytes, mime, { fetchImpl, base: fastBase });
   if (fast) return fast;
-  if (fast === '') throw new Error('没听清，再说一次');
+  if (fast === '') throw unclear();
   const root = String(base || '').replace(/\/+$/, '');
   let health;
   try {
@@ -61,6 +66,6 @@ export async function transcribeAudio(bytes, mime = 'audio/webm', { fetchImpl = 
   });
   if (!response.ok) throw new Error('没听清，再说一次');
   const text = transcriptText(await response.json());
-  if (!text) throw new Error('没听清，再说一次');
+  if (!text) throw unclear();
   return text;
 }

@@ -4,6 +4,7 @@ import { classifyPlaybackFault } from './playback-fault.js';
 import { SAY_LEAD_S } from './say-sync.js';
 import { attachVoice } from './voice-stream.js';
 import { deviceIdentity } from './handoff.js';
+import { listenForAnswer, withoutAsk, REC_ASK_TAIL, REC_STASHED_LINE } from './rec-ask.js';
 import { envelopeValue, equalPower, crossfadeDuration, mediaDeadline, waitForPlaying, waitForCanPlay } from './transitions.js';
 import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
 import { typewriter, renderStatic } from './subtitle.js';
@@ -858,7 +859,8 @@ function markStarted(holder) {
       const res = await fetch('/api/episode/started', {
         method: 'POST', signal: playbackController.signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: holder.episode.id, claimId: holder.claimId }),
+        // recAsk：朋友推荐那期由网页问「要听吗」、歌真响了再报 played（旧网页不带，服务端照旧开口就算已播）
+        body: JSON.stringify({ id: holder.episode.id, claimId: holder.claimId, ...(holder.episode.friendRec ? { recAsk: true } : {}) }),
       });
       if (!res.ok) throw new Error('确认播放失败');
     } catch {
@@ -1114,6 +1116,8 @@ function showSong(item, i) {
 
 function onItemStart(item, i) {
   if (item.type === 'song') {
+    // 朋友推荐的歌真响了才算已播（报幕时还不知道放不放：要先问「要听吗」）
+    if (item.meta?.friendRec && !item.friendPlayed) { item.friendPlayed = true; friendAction('played', item.meta.friendRec); }
     startSongSession(item);
     showSong(item, i);
   } else {
@@ -1297,6 +1301,7 @@ function startBlend(songItem, songIdx) {
   if (voiceContext?.bed || slots.get(idle)?.loading) return;
   const ctx = voiceContext;
   if (!ctx || ctx.bedLoading) return;
+  if (ctx.getEpisode()?.friendRec) return; // 朋友推荐那期要先问「要听吗」：答了再起歌，不垫在口播下面
   ctx.bedLoading = true;
   startMusic(songItem, songIdx, { episode: ctx.getEpisode() || activeEpisode,
     holder: ctx.holder, bed: true, reason: ctx.origin === 'chat' ? 'skip' : 'completed' })
@@ -1524,7 +1529,7 @@ function failVoice(ctx = voiceContext) {
   if (ctx?.holder?.episode) ctx.holder.episode.voice = { status: 'skipped' };
   if (ep) {
     ep.voice = { status: 'skipped' };
-    logChat('claudio', ep.say || ctx?.text);
+    logChat('claudio', shownSay(ep) || ctx?.text);
   } else showControlReply(ctx?.text || '语音暂时离线，先听音乐');
   voiceContext = null; overlaying = false; ducked = false;
   if (!ep) { releaseHeldMusic(); restoreAfterOverlay(); }
@@ -1594,12 +1599,43 @@ function failChat(message) {
   if (voiceContext?.audible && !sayEnded && !voice.ended) voiceContext.failed = true;
   else if (!(exclusiveSink?.uid && overlaying && responseHeard && !sayEnded)) finishFailedChatVoice();
 }
+// 没念出来的朋友推荐不问，显示的字去掉「要听吗？」
+const shownSay = (ep) => (ep?.friendRec ? withoutAsk(ep.say) : ep?.say);
+function friendAction(action, rec) {
+  fetch(`/api/friends/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rec }) }).catch(() => {});
+}
+// 朋友推荐那期：报幕最后问了「要听吗」，念完开麦听 5 秒（录音交给 /api/voice 的短句识别）。上一首在底下小声接着放。
+// 说了听、或者根本听不了（没麦克风、不给权限、识别不通）→ 照常放；不听 / 没听清 → 这首不放、先存着（好友里点「听」找回），电台接着往下走。
+// 等的时候换歌、停止、换设备（playbackGen 变了）→ 也算没听，先存着。
+async function askFriendRec(ep, ctx) {
+  ep.recAnswered = 'asking';
+  const gen = playbackGen;
+  const signal = playbackController.signal;
+  setState('在听你回答…');
+  const reply = await listenForAnswer({ engine: 'record', signal });
+  if (!alive(gen) || ctx !== voiceContext || stopped) { friendAction('drop', ep.friendRec.id); return; }
+  if (reply.answer === 'yes' || reply.answer === 'unavailable') {
+    ep.recAnswered = 'yes';
+    finishAfterSay(ep, ctx);
+    return;
+  }
+  ep.recAnswered = 'no';
+  friendAction('drop', ep.friendRec.id);
+  logChat('claudio', REC_STASHED_LINE);
+  // 当成一期不带歌的节目收尾：口播舞台收起、上一首音量回来，放完接着领下一期
+  finishAfterSay({ ...ep, queue: ep.queue.filter((q) => q.type !== 'song'), intent: 'chat' }, ctx);
+}
 function finishAfterSay(ep, endedContext = voiceContext) {
   if (endedContext?.holder?.released) return;
   if (paused) { pausedWork.set('finishSay', () => finishAfterSay(ep, endedContext)); return; }
   if (streamDone || stopped) return;
   if (endedContext?.bedLoading) {
     later(() => finishAfterSay(ep, endedContext), 100, { key: 'finishSay' });
+    return;
+  }
+  if (ep?.friendRec && !ep.recAnswered && endedContext?.audible && ep.voice?.status !== 'skipped' && !exclusiveSink?.uid
+    && String(ep.say || '').endsWith(REC_ASK_TAIL)) {
+    void askFriendRec(ep, endedContext);
     return;
   }
   streamDone = true;
@@ -1639,7 +1675,7 @@ function enterEpisodeSmooth(ep, holder = null) {
   if (say && ep.voice?.status !== 'skipped') {
     startSayOverlay(say.url, say.text || ep.say, () => ep, holder);
   } else {
-    logChat('claudio', ep.say);
+    logChat('claudio', shownSay(ep));
     if (ep.say) setState('语音离线，先放歌');
     const first = ep?.queue?.findIndex((q) => q.type === 'song') ?? -1;
     if (first >= 0) startMusic(ep.queue[first], first, { episode: ep, holder, reason: holder ? 'completed' : 'skip' });
@@ -2052,7 +2088,7 @@ function maybeEnterPending(remain = 0) {
   pendingEpisode = null; claimId = null; clearTimeout(voicePoll);
   ep.voice = { status: 'skipped' };
   ep.queue = ep.queue.filter((q) => q.type !== 'tts');
-  logChat('claudio', ep.say); if (ep.say) setState('语音离线，先放歌');
+  logChat('claudio', shownSay(ep)); if (ep.say) setState('语音离线，先放歌');
   if (first >= 0) startMusic(ep.queue[0], 0, { episode: ep, holder });
   else { releaseClaim(holder); continueRadio(); }
 }

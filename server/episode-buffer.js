@@ -200,7 +200,7 @@ export function createEpisodeBuffer({
     let revised = 0;
     for (const ep of pending) {
       if (!ep?.say || ep.muted || ep === current) continue;
-      const say = String(rewrite(ep.say) || '').trim();
+      const say = String(rewrite(ep.say, ep) || '').trim();
       if (!say || say === ep.say) continue;
       voiceJobs.get(ep.id)?.abort();
       voiceJobs.delete(ep.id);

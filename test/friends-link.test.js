@@ -48,8 +48,8 @@ test('一期只有这首：标 friend、带出处，报幕念推荐人和附言�
   assert.equal(ep.queue[0].meta.discoveryType, 'friend');
   assert.equal(ep.queue[0].meta.friendRec, 'rec_1');
   assert.equal(ep.friendRec.from, '小王');
-  assert.equal(ep.say, '小王给你推荐了周杰伦的《晴天》：「下雨天听这个」');
-  assert.match(ep.sayTts, /小王给你推荐了《晴天》.*小王留了句话：下雨天听这个/);
+  assert.equal(ep.say, '小王给你推荐了周杰伦的《晴天》：「下雨天听这个」要听吗？');
+  assert.match(ep.sayTts, /小王给你推荐了《晴天》。.*小王留了句话：下雨天听这个。要听吗？/);
   assert.ok(ep.sayTts.startsWith(tone.style));
   assert.equal(ep.voice.status, 'pending');
 });
@@ -85,4 +85,10 @@ test('老板禁播过的歌，朋友推荐了也不放，告诉公用版放不�
   assert.equal(ep, null);
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(link.posts.at(-1), ['unplayable', { rec: 'rec_1' }]);
+});
+
+test('驾驶模式打开时备好的推荐那期改短：留出处和歌名，问句不丢', async () => {
+  const { driveAsk } = await import('../server/friends-link.js');
+  assert.equal(driveAsk('小王给你推荐了周杰伦的《晴天》：「下雨天听这个。真的」要听吗？'), '小王给你推荐了周杰伦的《晴天》，要听吗？');
+  assert.equal(driveAsk('没有书名号的一句话。后面还有'), '没有书名号的一句话。');
 });

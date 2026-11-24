@@ -149,7 +149,7 @@ test('加好友、推荐、插播第一首、报幕带名字和附言、开播�
     assert.equal(batch.songs[0].id, 777);
     assert.equal(batch.songs[0].rec.from, '小王');
     assert.equal(batch.songs[0].rec.note, '下雨天听这个');
-    assert.equal(batch.songs[0].say, '小王给你推荐了周杰伦的《晴天》：「下雨天听这个」');
+    assert.equal(batch.songs[0].say, '小王给你推荐了周杰伦的《晴天》：「下雨天听这个」要听吗？');
     assert.ok(t.calls.includes('id:777:'));
     assert.match(ttsCalls.at(-1), /小王给你推荐了《晴天》.*小王留了句话：下雨天听这个/);
     // 下一批不再插（隔 10 分钟）
@@ -186,7 +186,7 @@ test('附言大脑判不过 / 判不了：只推荐歌，收的人看不到、�
       assert.equal((await t.req('/api/friends', { cookie: a })).data.sent[0].noteState, 'rejected');
       const batch = (await t.req('/api/chat', { body: { text: '' }, cookie: b })).data;
       assert.equal(batch.songs[0].rec.note, '');
-      assert.equal(batch.songs[0].say, '小王给你推荐了某的《歌五》。');
+      assert.equal(batch.songs[0].say, '小王给你推荐了某的《歌五》。要听吗？');
       assert.ok(!ttsCalls.at(-1).includes('一句话'));
     } finally { t.close(); }
   }
@@ -302,6 +302,53 @@ test('老板内部口：互加、互推；老板的附言不叫大脑；/owner �
     assert.deepEqual(Object.keys((await t.own('/owner/stats')).data).sort(), ['friendPairs', 'playedToday', 'recsToday', 'recsTotal']);
     assert.equal((await t.own('/owner/remove', { id: A })).status, 200);
     assert.deepEqual((await t.own('/owner/overview')).data.friends, []);
+  } finally { t.close(); }
+});
+
+test('先存着 / 找回：只能动自己的推荐；推荐人看不到；老板走内部口', async () => {
+  const t = await startApp();
+  try {
+    const a = await t.join(A, '小王');
+    const b = await t.join(B, '小李');
+    const c = await t.join(C, '小陈');
+    await t.befriend(a, b);
+    await t.listen(a, { id: 51, title: '存着的', artist: '某' });
+    const rec = (await t.req('/api/friends/recommend', { body: { to: B, songId: 51 }, cookie: a })).data.rec;
+    assert.equal((await t.req('/api/friends/drop', { body: { rec: rec.id } })).status, 401, '没设备不行');
+    assert.equal((await t.req('/api/friends/drop', { body: { rec: rec.id }, cookie: c })).status, 404, '别人的动不了');
+    assert.equal((await t.req('/api/friends/drop', { body: { rec: rec.id }, cookie: a })).status, 404, '推荐人也动不了');
+    assert.equal((await t.req('/api/friends/drop', { body: { rec: rec.id }, cookie: b })).data.rec.status, 'dropped');
+    assert.deepEqual((await t.req('/api/friends/dropped', { cookie: b })).data.dropped.map((r) => r.id), [rec.id]);
+    assert.deepEqual((await t.req('/api/friends/dropped', { cookie: c })).data.dropped, []);
+    assert.equal((await t.req('/api/friends', { cookie: b })).data.inbox[0].status, 'dropped');
+    assert.equal((await t.req('/api/friends', { cookie: a })).data.sent[0].status, 'sent', '推荐人看不到被存着');
+    assert.equal((await t.req('/api/friends/recover', { body: { rec: rec.id }, cookie: c })).status, 404);
+    assert.equal((await t.req('/api/friends/recover', { body: { rec: rec.id }, cookie: b })).data.rec.status, 'new');
+    // 老板：小王推给老板，老板存着再找回
+    await t.req('/api/friends/add', { body: { code: (await t.own('/owner/code', {})).data.code }, cookie: a });
+    await t.listen(a, { id: 52, title: '给老板的', artist: '某' });
+    const toOwner = (await t.req('/api/friends/recommend', { body: { to: OWNER_ID, songId: 52 }, cookie: a })).data.rec;
+    assert.equal((await t.own('/owner/drop', { rec: toOwner.id })).data.rec.status, 'dropped');
+    assert.equal((await t.own('/owner/dropped')).data.dropped[0].id, toOwner.id);
+    assert.equal((await t.own('/owner/recover', { rec: toOwner.id })).data.rec.status, 'new');
+    assert.equal((await t.req('/owner/drop', { body: { rec: toOwner.id }, cookie: a })).status, 404, '对外口没有 /owner');
+  } finally { t.close(); }
+});
+
+test('报幕问「要听吗」：驾驶模式念短版也带问句（不被切成一句丢掉问句）', async () => {
+  const ttsCalls = [];
+  const t = await startApp({ ttsCalls, askIdle: async () => ({ sayTagged: '大脑写的报幕' }) });
+  try {
+    const a = await t.join(A, '小王');
+    const b = await t.join(B, '小李');
+    await t.befriend(a, b);
+    await t.listen(a, { id: 61, title: '一首很长很长很长很长很长的歌名', artist: '某' });
+    await t.req('/api/friends/recommend', { body: { to: B, songId: 61, note: '这首很适合开车的时候听' }, cookie: a });
+    const out = (await t.req('/api/chat', { body: { text: '', drive: true }, cookie: b })).data;
+    assert.equal(out.songs[0].id, 61);
+    assert.ok(out.songs[0].say.endsWith('要听吗？'));
+    await settle();
+    assert.ok(ttsCalls.at(-1).endsWith('小王给你推荐了《一首很长很长很长很长很长的歌名》，要听吗？'), ttsCalls.at(-1));
   } finally { t.close(); }
 });
 

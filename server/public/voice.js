@@ -72,6 +72,27 @@ export function recIntro({ from, song, note = '' }, rand = Math.random) {
   const say = `${from}给你推荐了${a ? `${a}的` : ''}《${t}》${note ? `：「${note}」` : '。'}`;
   return { say, speak: withNote(head, from, note) || voiceText(`${from}给你推荐了《${t}》。`) };
 }
+
+// 推荐的「先问一句」版：报完幕（和附言）停下来问，网页开麦听回答（web/rec-ask.js）。
+// 顺序要紧：附言在先、问句收尾，否则听起来像「听不听？还有句话说……」。
+// short：驾驶模式只念一句，也得把问句带上（oneSentence 会切掉问句）。
+// 网页没念出来（没语音）就不问，显示时把问句去掉（rec-ask.js 的 withoutAsk）。
+export const REC_ASK_TAIL = '要听吗？';
+export function recAsk({ from, song, note = '' }, { short = false } = {}) {
+  const t = String(song?.title || '').replace(/\s*[(（].*?[)）]\s*/g, '').trim() || String(song?.title || '').trim();
+  const a = String(song?.artist || '').split(' / ')[0];
+  // 显示的那行带歌手，念出来的那句不带（和 recIntro 一致，口播短一点也更好听）
+  const headSay = `${from}给你推荐了${a ? `${a}的` : ''}《${t}》`;
+  const headSpeak = `${from}给你推荐了《${t}》`;
+  const say = `${headSay}${note && !short ? `：「${note}」` : '。'}${REC_ASK_TAIL}`;
+  const brief = voiceText(`${headSpeak}，${REC_ASK_TAIL}`);
+  if (short) return { say, speak: brief };
+  // 附言接在报幕后面，问句放在最后；接完超长度就退回不带附言的短句
+  const body = withNote(`${headSpeak}。`, from, note) || voiceText(`${headSpeak}。`);
+  const speak = plainLen(`${body}${REC_ASK_TAIL}`) <= VOICE_MAX ? `${body}${REC_ASK_TAIL}` : brief;
+  return { say, speak };
+}
+
 // 稿子后面接上附言：放得下就接，放不下只念稿子
 export function withNote(text, from, note) {
   const line = recNoteLine(from, note);

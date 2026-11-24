@@ -8,9 +8,8 @@ import { NcmBusyError, toHttps } from './ncm-public.js';
 import { HubError } from './hub-client.js';
 import { createMediaProxy } from './media.js';
 import { createMixer, shuffle, songKey } from './mix.js';
-import { createVoice, introLine, recIntro, withNote } from './voice.js';
+import { createVoice, introLine, recAsk } from './voice.js';
 import { createRecommender, matchFriend, mountFriendRoutes, parseRecText } from './friends-routes.js';
-import { stripTags } from '../tts/tags.js';
 import { oneSentence } from '../drive.js';
 import { readToneExtension } from '../tone.js';
 import { TALK_LEVELS, applyTalk, createTalkTracker, effectiveTalk, hourKeyOf, speakReasons, talkAck, talkFromText } from '../talk.js';
@@ -484,7 +483,13 @@ export function createPublicApp({
         return null;
       }
       media.remember(m.id, level, song);
-      return { ...songView({ cover: rec.song.cover, ...song }), rec: { id: rec.id, from: rec.from.name, note: rec.note } };
+      // friendRec 是前端认「这首要问一句」的标记（和个人版 friends-link 的字段同名）；
+      // rec 保留给报幕和旧页面读。
+      return {
+        ...songView({ cover: rec.song.cover, ...song }),
+        rec: { id: rec.id, from: rec.from.name, note: rec.note },
+        friendRec: { id: rec.id, from: rec.from.name },
+      };
     } catch (error) {
       log('friend-rec-skip', m.id, error.code || error.name);
       return null;
@@ -505,27 +510,25 @@ export function createPublicApp({
     const stamp = { at, tier: publicTone({ at }).key, hourKey: hourKeyOf(at, BEIJING) };
     songs.forEach((song, i) => {
       // 好友推荐的歌：模板报幕带上是谁推荐的和附言（附言原样接在后面念，不进大脑）；口播频率再低也报（talk.js 的 recommended）
-      const rec = song.rec ? recIntro({ from: song.rec.from, song, note: song.rec.note }) : null;
+      // 报完幕要停下来问一句「要听吗」，网页那边开麦等回答（web/rec-ask.js）：说了听才放，没听清 / 不听就先存着。
+      // 推荐的报幕一律用模板（问句必须在最后，大脑写的不保证）；驾驶模式用带问句的短版。
+      const rec = song.rec ? recAsk({ from: song.rec.from, song, note: song.rec.note }, { short: drive }) : null;
       const fallback = rec ? rec.speak : introLine(song);
       if (drive && i > 0) return;
       const why = speakReasons(level, { ...talker.context(stamp), recommended: Boolean(rec) });
       if (!why.length) { talker.markPlayed(at); return; }
       talker.markSpoken(stamp);
       song.say = rec ? rec.say : fallback;
-      if (drive || (i === 0 && !ahead)) {
-        song.voice = voice.request(m.id, drive ? oneSentence(fallback) : fallback, { tone });
+      if (rec || drive || (i === 0 && !ahead)) {
+        song.voice = voice.request(m.id, drive && !rec ? oneSentence(fallback) : fallback, { tone });
         return;
       }
       const produce = async () => {
         if (typeof brain.askIdle !== 'function') return '';
         try {
           const memory = members.memory(m.id);
-          const intro = rec ? { title: song.title, artist: song.artist, from: song.rec.from } : song;
-          const out = await brain.askIdle({ memory, bound: true, hour: beijingHour(), tone, intro, name: m.name, extension: adultExtension(memory, drive) }, { waitMs: 30_000 });
-          const tagged = out?.sayTagged || '';
-          // 大脑写的报幕必须先说是谁推荐的，不然用模板；附言由这里接上
-          if (rec) return stripTags(tagged).trim().startsWith(`${song.rec.from}给你推荐了`) ? withNote(tagged, song.rec.from, song.rec.note) : '';
-          return tagged;
+          const out = await brain.askIdle({ memory, bound: true, hour: beijingHour(), tone, intro: song, name: m.name, extension: adultExtension(memory, drive) }, { waitMs: 30_000 });
+          return out?.sayTagged || '';
         } catch (error) {
           log('intro-skip', m.id, error.code || error.name);
           return '';
@@ -569,8 +572,8 @@ export function createPublicApp({
       return res.json({ say: talkAck(talkChange), songs: [], notice: '', intent: 'chat', remaining: null, talk: talkChange.level });
     }
     // 「把这首推荐给小王，说……」：不打大脑、不扣次数、不记进对话
-    const recAsk = auto || !friends ? null : parseRecText(text);
-    const recReply = recAsk ? recommendByText(m, recAsk) : null;
+    const recText = auto || !friends ? null : parseRecText(text);
+    const recReply = recText ? recommendByText(m, recText) : null;
     if (recReply) return res.json(recReply);
     // 盒子出口匿名搜索一律 405，会连累主实例：没有默认音源（没配 NCM_SHARED_URL）时，没绑定的不开放点歌，也不扣次数
     if (!auto && !cookie && !ncm.borrowsOwner) {

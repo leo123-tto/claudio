@@ -91,9 +91,9 @@ import {
 import { controlHeadless, forgetHeadless, headlessStatus, playDefaultFile, playInRoom, stopHeadlessPlayback } from './headless-play.js';
 import { looksLikeRoomCommand, matchRoomCommand } from './rooms.js';
 import { roomStore } from './room-store.js';
-import { decodeVoiceAudio, transcribeAudio } from './voice.js';
+import { decodeVoiceAudio, transcribeAudio, transcribeFast } from './voice.js';
 import { createDriveState, oneSentence } from './drive.js';
-import { createFriendsLink, buildFriendEpisode, FriendsLinkError } from './friends-link.js';
+import { createFriendsLink, buildFriendEpisode, driveAsk, FriendsLinkError } from './friends-link.js';
 import { appVersion } from './version.js';
 import { stripTags } from './tts/tags.js';
 import { readToneExtension, toneFor, toneKey, ttsText } from './tone.js';
@@ -292,7 +292,7 @@ const episodeBuffer = createEpisodeBuffer({
   commit: (ep) => {
     currentEpisode = ep;
     commitEpisode(ep);
-    if (ep.friendRec) friendsLink?.post('played', { rec: ep.friendRec.id }).catch(() => {});
+    // 朋友推荐那期开口时还没定放不放（要先问「要听吗」）：歌真响了由网页报 /api/friends/played
   },
   emit: (message) => {
     if (message.kind === 'episodesInvalidated') {
@@ -1099,7 +1099,9 @@ app.post('/api/friends/:action', (req, res) => {
     const pick = { id: song.id, title: String(song.title || ''), artist: String(song.artist || ''), cover: String(song.cover || ''), duration: Number(song.duration) || 0 };
     return sendFriends(res, friendsLink.post('recommend', { to: String(body.to || ''), song: pick, note: String(body.note || '') }));
   }
-  // 网页只能做这几样；领下一首、标已播这些由后台自己调
+  // 推荐问「要听吗」之后（web/app.js 的 askFriendRec）：真放了才标已播；不听 / 没听清先存着；好友面板里点「听」找回
+  if (['played', 'drop', 'recover'].includes(action)) return sendFriends(res, friendsLink.post(action, { rec: String(body.rec || '') }));
+  // 网页只能做这几样；领下一首这些由后台自己调
   if (!['code', 'add', 'remove', 'block', 'unblock', 'profile', 'like'].includes(action)) return res.status(404).json({ error: 'not_found' });
   sendFriends(res, friendsLink.post(action, body));
 });
@@ -1405,10 +1407,17 @@ app.get('/api/exclusive', (_req, res) => {
 app.post('/api/voice', async (req, res) => {
   try {
     const bytes = decodeVoiceAudio(req.body?.audioBase64);
-    const text = await transcribeAudio(bytes, String(req.body?.mime || 'audio/webm'));
+    const mime = String(req.body?.mime || 'audio/webm');
+    // fast：推荐问「要听吗」后的回答（web/rec-ask.js）只走短句识别，不去拉起 5090 的识别档挤掉口播
+    if (req.body?.fast) {
+      const text = await transcribeFast(bytes, mime);
+      if (text === null) return res.status(503).json({ ok: false, error: '短句识别这会儿连不上' });
+      return text ? res.json({ ok: true, text }) : res.status(400).json({ ok: false, unclear: true, error: '没听清，再说一次' });
+    }
+    const text = await transcribeAudio(bytes, mime);
     res.json({ ok: true, text });
   } catch (error) {
-    res.status(400).json({ ok: false, error: error.message || '没听清，再说一次' });
+    res.status(400).json({ ok: false, error: error.message || '没听清，再说一次', ...(error.unclear ? { unclear: true } : {}) });
   }
 });
 
@@ -1497,7 +1506,7 @@ app.post('/api/sleep', (_req, res) => { episodeBuffer.idle(); res.json({ ok: tru
 // 之后新备的节目按驾驶模式写。关掉时已改短的就短着放，后面的照常。
 app.post('/api/drive', (req, res) => {
   if (driveState.set(req.body?.on === true) && driveState.on()) {
-    episodeBuffer.reviseSays(oneSentence, (say) => ttsText(say, toneFor('drive')));
+    episodeBuffer.reviseSays((say, ep) => (ep.friendRec ? driveAsk(say) : oneSentence(say)), (say) => ttsText(say, toneFor('drive')));
   }
   res.json({ ok: true, on: driveState.on() });
 });
@@ -1505,6 +1514,8 @@ app.post('/api/episode/release', (req, res) => res.json({ ok: true, released: ep
 app.post('/api/episode/started', (req, res) => {
   try {
     const ep = episodeBuffer.start(req.body?.id, req.body?.claimId);
+    // 旧网页（还没刷新、不会问「要听吗」也不会报 played）：照旧开口就算已播，免得同一首半小时后又来
+    if (ep.friendRec && req.body?.recAsk !== true) friendsLink?.post('played', { rec: ep.friendRec.id }).catch(() => {});
     res.json({ ok: true, id: ep.id });
   } catch (error) { res.status(409).json({ ok: false, error: clientError(error) }); }
 });

@@ -135,7 +135,7 @@ claudio/
 │  ├─ scheduler.js           # 节律调度（默认关；.env SCHEDULER_ENABLED=1 才开）
 │  ├─ state.js               # messages / plays / favs 持久化（cache/state.json）
 │  └─ public/                # 公用版（CLAUDIO_MODE=public，单独容器）：设备核验走 hub（docs/hub-api.md）、每人加密存网易云 cookie 和临时记忆
-│                            #   好友互荐：friends.js（好友码、推荐、上限、屏蔽、过期，一份加密文件 friends.enc）、friends-routes.js（/api/friends/* 和个人版用的只听本机的内部口 /owner/*）
+│                            #   好友互荐：friends.js（好友码、推荐、上限、屏蔽、过期、问过没听的先存着，一份加密文件 friends.enc）、friends-routes.js（/api/friends/* 和个人版用的只听本机的内部口 /owner/*）
 ├─ user/                     # 让 Claudio 属于你的几个文件
 │  ├─ taste.md               # 听歌口味 ✅ 注入 prompt
 │  ├─ favorites.md           # 喜欢的歌曲库（gen-favorites 生成）✅ 注入
@@ -170,6 +170,7 @@ claudio/
    ├─ voice-stream.js        # 口播边收边播：/api/tts/stream 用 MediaSource（iPhone 用 ManagedMediaSource）喂块，打不开就直接放
    ├─ drive.js               # 驾驶模式（两版共用，只管界面）：大键转给原按钮、说话（个人版走「说话」，公用版浏览器听写→键盘听写）、Wake Lock、记住开关
    ├─ friends.js / friends.css # 好友互荐（两版共用）：好友面板（好友码、好友、收到的 / 发出的、昵称、接收开关）、推荐给谁、「来自 XX」；引擎换歌时发 claudio:now
+   ├─ rec-ask.js             # 朋友推荐问「要听吗」之后开麦听 5 秒、判断听 / 不听（公用版浏览器听写，个人版录音走 /api/voice 短句识别）
    ├─ notebook.html/.js/.css # 「Vera 的笔记本」页面（两版共用，/notebook）：四栏卡片，能看、能改、能删、能标别再提；她引用的那条点开看原话
    ├─ window-mode.js         # 沉浸歌词（顶栏按钮 / F 进，Esc / 轻点空白退）：能网页全屏就全屏，iPhone Safari 等不给就页面内铺满；闲置隐藏控件
    └─ styles.css
@@ -191,6 +192,17 @@ claudio/
 - 暂停、换歌、音量等短句由 `server/intent.js` 直接执行，不打模型。
 - 「放到某个房间」由 `server/rooms.js` 在打模型前拦截。
 - 已删除的 `segue` 不要加回来。
+
+## 好友推荐：问一句再放
+
+朋友推荐的歌报幕最后问一句「要听吗？」（`server/public/voice.js` 的 `recAsk`，附言在前、问句收尾；驾驶模式用带问句的短版），口播念完网页开麦听 5 秒（`web/rec-ask.js`）：
+
+- 公用版用浏览器自带听写（和驾驶模式的「说话」同一套，不经家里的机器）；个人版录音交给 `/api/voice`，带 `fast:true` 只走短句识别，不去拉起 5090 的识别档。
+- 说「听 / 要 / 放 / 好」这类短句 → 放；说了不听、没听清、说了别的 → 不放，`friends.drop()` 挪到 `dropped` 先存着。存着的最多 5 条、7 天，和别的推荐一样只在 `friends.enc` 里；好友面板「收到的」里显示「先存着」，点「听」`recover()` 重新排队。发的人那边照样只看到「已送达」。
+- 根本听不了（没有听写 / 麦克风、不给权限、授权框 8 秒没点、识别服务不通）→ 照旧直接放，不吞推荐。等的时候换歌、停止 → 算没听，先存着。
+- 没念出来（没语音）就不问，直接放，显示的字去掉问句（`withoutAsk`）。
+- 判断（`readAnswer`）：先判拒绝 / 推迟（「不要」里有「要」）；带否定字、超过 8 个字、不全是答应的词，一律不算答应——误放收不回来，存着的还能找回。
+- 个人版：报幕开口时不再标已播，歌真响了网页报 `/api/friends/played`；问的时候上一首在底下小声接着放（录音开回声消除）。AirPlay 单独出声时不问，直接放。
 
 ---
 
@@ -278,7 +290,7 @@ MVP 4 条 → 全功能 6 条：
 | GET | `/api/playback` | 多设备接力：服务端记的当前歌、进度（在响时按时间往前推）、后面几首、哪台在响；直链先刷新 | ✅ |
 | POST | `/api/playback` | `{deviceId, deviceName, playing, song, position, queue}`：设备上报；开始响时 WS 推 `handoff`，别的设备自己停 | ✅ |
 | GET | `/api/friends` | 好友互荐：自己的好友、收到的、发出的（发出的不给看被跳过）、今天还能推几首。个人版转给公用版内部口（`FRIENDS_URL`），没配回 404 | ✅ |
-| POST | `/api/friends/:action` | `code` 生成好友码（15 分钟、用一次）· `add {code}` · `remove / block / unblock {id}` · `profile {nick, accept}` · `recommend {to, song, note}`（附言 ≤30 字，本地规则不过整条不发）· `like {rec}` | ✅ |
+| POST | `/api/friends/:action` | `code` 生成好友码（15 分钟、用一次）· `add {code}` · `remove / block / unblock {id}` · `profile {nick, accept}` · `recommend {to, song, note}`（附言 ≤30 字，本地规则不过整条不发）· `like {rec}` · `drop / recover {rec}`（推荐问了没听先存着 / 找回；个人版另有 `played {rec}`，歌真响了才报）。公用版另有 `GET /api/friends/dropped` | ✅ |
 | GET | `/api/taste` | 读用户口味档案 | 未实现 |
 | GET | `/api/plan/today` | 今日节目编排 | 未实现 |
 

@@ -1,6 +1,7 @@
 // 公用版播放引擎：一个 <audio> 顺序放（口播和歌共用），队列空了就让 DJ 接着排。
 // 界面和个人版同一份（index.html / styles.css / ui.js）；这里只管公用版的播放、门口、绑定、配额、最近听过。
 import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
+import { listenForAnswer, withoutAsk, ANSWER_FALLBACK_MS, REC_STASHED_LINE } from './rec-ask.js';
 import { createCovers, createChatStrip, wireImmersive, MASCOT, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality } from './ui.js';
 
 const $ = (id) => document.getElementById(id);
@@ -459,6 +460,8 @@ $('moodInput').addEventListener('input', touchChat);
 // 后台现写的报幕，字在响应头 X-Say 里，取到就换掉模板句（没语音也有字）。口播和歌用同一个 <audio>（iOS 上第二个音频元素不一定让自动出声）。
 let mode = 'song';
 let voiceTimer = null;
+// 推荐问「要听吗」之后在听的那一条（换歌就作废）
+let asking = null;
 async function prefetchVoice(song) {
   if (!song?.voice || song.voiceUrl) return;
   try {
@@ -477,6 +480,7 @@ function resetProgress() {
 
 async function playNext() {
   clearTimeout(voiceTimer);
+  asking?.controller.abort();
   if (mode === 'chatvoice') { mode = 'song'; held = null; speaking = false; touchChat(); }
   if (current?.voiceUrl) URL.revokeObjectURL(current.voiceUrl);
   current = queue.shift() || null;
@@ -494,13 +498,52 @@ async function playNext() {
     showDj(current.say || '', 0, current.memoryRef || null);
     audio.src = current.voiceUrl;
     applyLoudness(null);
-    voiceTimer = setTimeout(() => { if (wantPlay) startSong(); }, 15000); // 念不完也不卡歌（按了暂停就不切）
+    // 推荐的歌：报完幕要停下来问一句，等他回答；其它歌念不完就切（按了暂停就不切）
+    voiceTimer = setTimeout(() => { if (wantPlay) voiceEnded(); }, current.friendRec ? ANSWER_FALLBACK_MS : 15000);
     try { await audio.play(); } catch (error) { startSong(error); }
   } else {
-    if (current.say) showDj(current.say, 6000, current.memoryRef || null); else showStage('lyric');
+    // 没念出来就不问，直接放（显示的字去掉「要听吗？」）
+    const say = current.friendRec ? withoutAsk(current.say) : current.say;
+    if (say) showDj(say, 6000, current.memoryRef || null); else showStage('lyric');
     await startSong();
   }
   if (queue.length === 0) ask('');
+}
+
+// 口播放完（或兜底超时）之后：普通歌直接切，朋友推荐的要先听回答（报幕最后问了「要听吗」）
+function voiceEnded() {
+  const rec = current?.friendRec;
+  if (!rec) return startSong();
+  clearTimeout(voiceTimer);
+  void answerForRec(rec);
+}
+
+// 开麦听 5 秒（浏览器听写，不经老板家里的机器）：说了听就放；说了不听或没听清就先存着（好友里能找回）；
+// 根本听不了（没听写、不给权限、授权框没点）就照旧放，别把推荐吞掉。
+function stashedNotice() {
+  setNotice(REC_STASHED_LINE);
+  setTimeout(() => { if ($('notice').textContent === REC_STASHED_LINE) setNotice(''); }, 8000);
+}
+async function answerForRec(rec) {
+  if (asking?.id === rec.id) return;
+  asking?.controller.abort();
+  const ask = { id: rec.id, controller: new AbortController() };
+  asking = ask;
+  setNotice('在听你回答…');
+  const reply = await listenForAnswer({ engine: 'speech', signal: ask.controller.signal });
+  if (asking === ask) asking = null;
+  const drop = () => api('/api/friends/drop', { method: 'POST', body: { rec: rec.id } }).catch(() => {});
+  // 等的时候按了下一首：算没听，先存着
+  if (ask.controller.signal.aborted) { setNotice(''); void drop(); return; }
+  // 已经手动放起来了：这次回答作废
+  if (current?.friendRec?.id !== rec.id || mode !== 'voice') { setNotice(''); return; }
+  if (reply.answer === 'yes' || reply.answer === 'unavailable') { setNotice(''); return startSong(); }
+  stashedNotice();
+  void drop();
+  if (current.voiceUrl) URL.revokeObjectURL(current.voiceUrl);
+  current = null;
+  if (wantPlay) await playNext();
+  else setNowPlaying(null, '');
 }
 
 async function startSong(blocked) {
@@ -542,7 +585,7 @@ audio.addEventListener('playing', () => {
   }
 });
 audio.addEventListener('pause', () => setPlaying(false));
-audio.addEventListener('ended', () => (mode === 'voice' ? startSong() : mode === 'chatvoice' ? finishInline() : playNext()));
+audio.addEventListener('ended', () => (mode === 'voice' ? voiceEnded() : mode === 'chatvoice' ? finishInline() : playNext()));
 audio.addEventListener('timeupdate', () => {
   if (mode !== 'song') return;
   paintProgress({ fill: $('barFill'), cur: $('curTime'), dur: $('durTime') }, audio.currentTime, audio.duration);

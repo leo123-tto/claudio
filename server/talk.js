@@ -100,7 +100,7 @@ export function speakReasons(level, ctx = {}) {
 export const shouldSpeak = (level, ctx) => speakReasons(level, ctx).length > 0;
 
 // 今天的临时档存在一个小文件里（个人版 cache/talk.json）：{ level, until }。读不到、过期都当没有。
-export function createTodayFile(file, { now = Date.now } = {}) {
+export function createTodayFile(file, { now = () => Date.now() } = {}) {
   return {
     read() {
       try {

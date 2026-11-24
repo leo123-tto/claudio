@@ -5,11 +5,11 @@
 // 只拿回「朋友推荐给老板的歌 + 附言」。老板的口味、记忆、听歌记录一律不送。
 // 朋友推荐的歌在个人版里标 discoveryType=friend：放了 / 听完 / 跳过都不进口味推断（profile.js），只有老板自己红心才算。
 import { randomUUID } from 'node:crypto';
-import { recIntro } from './public/voice.js';
+import { recAsk, REC_ASK_TAIL } from './public/voice.js';
 import { oneSentence } from './drive.js';
 import { ttsText } from './tone.js';
 
-const ROUTES = new Set(['code', 'add', 'remove', 'block', 'unblock', 'profile', 'recommend', 'next', 'played', 'like', 'like-song', 'unplayable']);
+const ROUTES = new Set(['code', 'add', 'remove', 'block', 'unblock', 'profile', 'recommend', 'next', 'played', 'like', 'like-song', 'unplayable', 'drop', 'recover']);
 
 export class FriendsLinkError extends Error {
   constructor(status, body) {
@@ -47,6 +47,12 @@ export function createFriendsLink(baseUrl, { fetchFn = fetch, timeout = 2500 } =
   };
 }
 
+// 驾驶模式打开时已备好的朋友推荐那期：只留「XX给你推荐了…《Y》」再接问句（oneSentence 会把问句切掉）
+export function driveAsk(say) {
+  const head = String(say || '').match(/^[^《]*《[^》]*》/)?.[0];
+  return head ? `${head}，${REC_ASK_TAIL}` : oneSentence(say);
+}
+
 // 朋友推荐的歌做成一期：只这一首，模板报幕带上是谁推荐的和附言（不叫大脑）。没有、拿不到、放不了都返回 null，照常备节目。
 // songUrl(id) 按 id 取直链（备用音源 id 也认）；取不到再 resolve(歌名 / 歌手) 搜一次。网易云忙（抛错）不算放不了，过半小时再给。
 export async function buildFriendEpisode({ link, songUrl, resolve, epoch, tone = null, drive = false, cacheHas = () => false, banned = () => false, log = () => {} }) {
@@ -76,12 +82,13 @@ export async function buildFriendEpisode({ link, songUrl, resolve, epoch, tone =
     return null;
   }
   const from = rec.from?.name || '朋友';
-  const intro = recIntro({ from, song, note: rec.note || '' });
-  const speak = drive ? oneSentence(intro.speak) : intro.speak;
+  // 报完幕问「要听吗」，网页开麦听回答（web/app.js 的 askFriendRec）；驾驶模式用带问句的短版
+  const intro = recAsk({ from, song, note: rec.note || '' }, { short: drive });
+  const speak = intro.speak;
   const id = audio.id || song.id;
   return {
     id: randomUUID(), epoch, sayWrittenAt: Date.now(),
-    say: drive ? oneSentence(intro.say) : intro.say,
+    say: intro.say,
     sayTts: speak && tone ? ttsText(speak, tone) : speak,
     intent: 'recommend', reason: 'friend',
     voice: { status: speak ? 'pending' : 'skipped' },
