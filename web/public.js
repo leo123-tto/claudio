@@ -1,6 +1,7 @@
 // 公用版播放引擎：一个 <audio> 顺序放（口播和歌共用），队列空了就让 DJ 接着排。
 // 界面和个人版同一份（index.html / styles.css / ui.js）；这里只管公用版的播放、门口、绑定、配额、最近听过。
 import { parseLrc, createLyricView, startLyricClock, LYRIC_LEAD } from './lyrics.js';
+import { listenForAnswer, ANSWER_FALLBACK_MS } from './rec-ask.js';
 import { createCovers, createChatStrip, wireImmersive, MASCOT, fmtTime, paintProgress, seekFraction, paintHeart, onEnter, paintQuality } from './ui.js';
 
 const $ = (id) => document.getElementById(id);
@@ -459,6 +460,11 @@ $('moodInput').addEventListener('input', touchChat);
 // 后台现写的报幕，字在响应头 X-Say 里，取到就换掉模板句（没语音也有字）。口播和歌用同一个 <audio>（iOS 上第二个音频元素不一定让自动出声）。
 let mode = 'song';
 let voiceTimer = null;
+// 推荐问句的等待状态：一次只等一条（answering），答「要听」的记下来避免重复问（wanted）
+let answering = false;
+const wanted = new Set();
+/** 等了一会儿没回应时念的一句，和服务端 voice.js 的 REC_STASHED_LINE 保持一致。 */
+const REC_STASHED_LINE = '那先给你存着，想听随时问我。';
 async function prefetchVoice(song) {
   if (!song?.voice || song.voiceUrl) return;
   try {
@@ -494,13 +500,65 @@ async function playNext() {
     showDj(current.say || '', 0, current.memoryRef || null);
     audio.src = current.voiceUrl;
     applyLoudness(null);
-    voiceTimer = setTimeout(() => { if (wantPlay) startSong(); }, 15000); // 念不完也不卡歌（按了暂停就不切）
+    // 推荐的歌：报完幕要停下来问一句，等他回答；其它歌念不完就切（按了暂停就不切）
+    voiceTimer = setTimeout(() => { if (wantPlay) voiceEnded(); }, current.friendRec ? ANSWER_FALLBACK_MS : 15000);
     try { await audio.play(); } catch (error) { startSong(error); }
   } else {
     if (current.say) showDj(current.say, 6000, current.memoryRef || null); else showStage('lyric');
     await startSong();
   }
   if (queue.length === 0) ask('');
+}
+
+// 口播放完（或兜底超时）之后：普通歌直接切，朋友推荐的要先问一句「要听吗」
+function voiceEnded() {
+  const rec = current?.friendRec;
+  if (!rec) return startSong();
+  clearTimeout(voiceTimer);
+  void answerForRec(rec);
+}
+
+// 开麦听 5 秒：说了听就立刻切；说了不听、或者没出声，就把这首暂存起来（还能问回来）。
+async function answerForRec(rec) {
+  if (answering) return;
+  answering = true;
+  let reply = { answer: 'none', text: '' };
+  try { reply = await listenForAnswer(); } catch { /* 没麦克风也当没回应 */ }
+  answering = false;
+  if (current?.friendRec?.id !== rec.id) return; // 等待期间已经换歌了
+  if (reply.answer === 'yes') {
+    wanted.add(rec.id);
+    return startSong();
+  }
+  // 暂存：告诉用户一句，然后把这首从队列里跳过（不播），记录留给「刚才谁推荐了什么」
+  showDj(REC_STASHED_LINE, 6000, null);
+  sayStashed();
+  void dropRec(rec.id);
+  current = null;
+  await playNext();
+}
+
+// 暂存时念一句：有系统语音就用它，没有就只显示文字（不额外走服务端 TTS，省一次合成）
+function sayStashed() {
+  try {
+    const synth = globalThis.speechSynthesis;
+    if (!synth) return;
+    const utter = new SpeechSynthesisUtterance(REC_STASHED_LINE);
+    utter.lang = 'zh-CN';
+    utter.volume = 0.9;
+    synth.speak(utter);
+  } catch { /* 念不了就算了，文字已经显示 */ }
+}
+
+// 丢弃记录：公用版走 /api/friends/drop，个人版走 owner 口（由各自页面实现 dropRec）
+async function dropRec(id) {
+  try {
+    await fetch('/api/friends/drop', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rec: id }),
+    });
+  } catch { /* 存不上也不影响跳过这首 */ }
 }
 
 async function startSong(blocked) {
@@ -542,7 +600,7 @@ audio.addEventListener('playing', () => {
   }
 });
 audio.addEventListener('pause', () => setPlaying(false));
-audio.addEventListener('ended', () => (mode === 'voice' ? startSong() : mode === 'chatvoice' ? finishInline() : playNext()));
+audio.addEventListener('ended', () => (mode === 'voice' ? voiceEnded() : mode === 'chatvoice' ? finishInline() : playNext()));
 audio.addEventListener('timeupdate', () => {
   if (mode !== 'song') return;
   paintProgress({ fill: $('barFill'), cur: $('curTime'), dur: $('durTime') }, audio.currentTime, audio.duration);

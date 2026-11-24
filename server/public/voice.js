@@ -72,6 +72,28 @@ export function recIntro({ from, song, note = '' }, rand = Math.random) {
   const say = `${from}给你推荐了${a ? `${a}的` : ''}《${t}》${note ? `：「${note}」` : '。'}`;
   return { say, speak: withNote(head, from, note) || voiceText(`${from}给你推荐了《${t}》。`) };
 }
+
+// 推荐的「先问一句」版：不自动放，等对方回一句。
+// 和 recIntro 的区别只在最后——报完幕（和附言）要停下来问，不回应就当没听。
+// 顺序要紧：附言在先、问句收尾，否则听起来像「听不听？还有句话说……」。
+export const REC_ASK_TAIL = '要听吗？';
+export function recAsk({ from, song, note = '' }) {
+  const t = String(song?.title || '').replace(/\s*[(（].*?[)）]\s*/g, '').trim() || String(song?.title || '').trim();
+  const a = String(song?.artist || '').split(' / ')[0];
+  // 显示的那行带歌手，念出来的那句不带（和 recIntro 一致，口播短一点也更好听）
+  const headSay = `${from}给你推荐了${a ? `${a}的` : ''}《${t}》`;
+  const headSpeak = `${from}给你推荐了《${t}》`;
+  const say = `${headSay}${note ? `：「${note}」` : '。'}${REC_ASK_TAIL}`;
+  // 附言接在报幕后面，问句放在最后；接完超长度就退回不带附言的短句
+  const body = withNote(`${headSpeak}。`, from, note) || voiceText(`${headSpeak}。`);
+  const speak = plainLen(`${body}${REC_ASK_TAIL}`) <= VOICE_MAX
+    ? `${body}${REC_ASK_TAIL}`
+    : voiceText(`${headSpeak}，${REC_ASK_TAIL}`);
+  return { say, speak };
+}
+
+// 等了一会儿没回应：先说句「算你的」，别让对方以为点错了。
+export const REC_STASHED_LINE = '那先给你存着，想听随时问我。';
 // 稿子后面接上附言：放得下就接，放不下只念稿子
 export function withNote(text, from, note) {
   const line = recNoteLine(from, note);

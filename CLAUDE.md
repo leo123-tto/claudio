@@ -135,7 +135,7 @@ claudio/
 │  ├─ scheduler.js           # 节律调度（默认关；.env SCHEDULER_ENABLED=1 才开）
 │  ├─ state.js               # messages / plays / favs 持久化（cache/state.json）
 │  └─ public/                # 公用版（CLAUDIO_MODE=public，单独容器）：设备核验走 hub（docs/hub-api.md）、每人加密存网易云 cookie 和临时记忆
-│                            #   好友互荐：friends.js（好友码、推荐、上限、屏蔽、过期，一份加密文件 friends.enc）、friends-routes.js（/api/friends/* 和个人版用的只听本机的内部口 /owner/*）
+│                            #   好友互荐：friends.js（好友码、推荐、上限、屏蔽、过期、问过没听的暂存，一份加密文件 friends.enc）、friends-routes.js（/api/friends/* 和个人版用的只听本机的内部口 /owner/*）
 ├─ user/                     # 让 Claudio 属于你的几个文件
 │  ├─ taste.md               # 听歌口味 ✅ 注入 prompt
 │  ├─ favorites.md           # 喜欢的歌曲库（gen-favorites 生成）✅ 注入
@@ -203,6 +203,24 @@ claudio/
 - 进度写 `docs/progress.md`；本文件只放稳定总览。
 - 新增第三方依赖要说明理由、作用、影响。
 - 走分支 + PR，`npm test` 通过再合并；流程和截图要求见 `CONTRIBUTING.md`。
+
+### 好友推荐：问一句再放
+
+朋友推荐的歌**不自动插播**。Vera 报幕改成 `recAsk`（`server/public/voice.js`）——附言在前、问句收尾
+（「小王给你推荐了《晴天》。小王留了句话：下雨天听这个。要听吗？」），然后：
+
+1. 口播播完 → 网页自动开麦听 5 秒（`web/rec-ask.js` 的 `listenForAnswer`）。拿不到「播完」时刻就
+   从开始念算 **15 秒**兜底（`ANSWER_FALLBACK_MS`）。
+2. 说「听 / 要 / 放」→ **立刻切**这首。
+3. 说「不听 / 算了」，或者没出声 → `friends.drop()` 把这条挪到 `dropped`：不再插播，**记录留着**，
+   用户之后问「刚才谁推荐了什么」还能找回来（`droppedList`，最多 5 条、留 7 天），`recover()` 可重新排队。
+4. 丢弃时念一句 `REC_STASHED_LINE`（「那先给你存着，想听随时问我。」）。
+
+判「听没听懂」用 `rec-ask.js` 的 `readAnswer`：**先判否定**（「不要」里也有「要」），拿不准一律当没回应
+——静默丢弃比误播一首可控。录音必须开回声消除，否则歌会被听成回答。
+
+字段约定：公用版给推荐歌补 `friendRec: { id, from }`（和个人版 `friends-link.js` 同名），前端凭它认
+「这首要问一句」。**个人版播放器（`web/app.js`）还没接这条链**——它走 episode 流转，要单独改。
 
 ---
 

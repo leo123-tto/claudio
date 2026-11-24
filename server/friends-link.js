@@ -5,7 +5,7 @@
 // 只拿回「朋友推荐给老板的歌 + 附言」。老板的口味、记忆、听歌记录一律不送。
 // 朋友推荐的歌在个人版里标 discoveryType=friend：放了 / 听完 / 跳过都不进口味推断（profile.js），只有老板自己红心才算。
 import { randomUUID } from 'node:crypto';
-import { recIntro } from './public/voice.js';
+import { recAsk } from './public/voice.js';
 import { oneSentence } from './drive.js';
 import { ttsText } from './tone.js';
 
@@ -76,7 +76,7 @@ export async function buildFriendEpisode({ link, songUrl, resolve, epoch, tone =
     return null;
   }
   const from = rec.from?.name || '朋友';
-  const intro = recIntro({ from, song, note: rec.note || '' });
+  const intro = recAsk({ from, song, note: rec.note || '' });
   const speak = drive ? oneSentence(intro.speak) : intro.speak;
   const id = audio.id || song.id;
   return {

@@ -28,6 +28,8 @@ export const LIMITS = Object.freeze({
   codeMinutes: 15,
   listMax: 100, // 「收到 / 发出」各给多少条
   offerAgainMs: 30 * 60_000, // 交给网页后半小时没开播（页面关了）就当没送到，下次再给
+  lostMax: 5, // 问过没听的最多记几条，给「找回」用
+  lostDays: 7, // 超过这些天的没听记录不再念
   gapMs: 10 * 60_000, // 同一个人两次插播至少隔多久
   noteWaitMs: 3 * 60_000, // 附言还在检查时，最多等多久再送（送时附言没判完就不带）
 });
@@ -171,6 +173,8 @@ export function createFriendStore({
     for (const [code, c] of Object.entries(d.codes)) if (c.until <= t) { delete d.codes[code]; changed = true; }
     for (const rec of d.recs) {
       if (rec.status === 'pending' && t - rec.at > limits.expireDays * DAY) { rec.status = 'expired'; changed = true; }
+      // 问过没听的只留一段时间给「找回」用，久了就清掉，别让记录一直涨
+      if (rec.status === 'dropped' && t - (rec.droppedAt || rec.at) > limits.lostDays * DAY) { rec.status = 'expired'; changed = true; }
     }
     if (d.recs.length > KEEP) { d.recs = d.recs.slice(-KEEP); changed = true; }
     if (changed) save();
@@ -346,13 +350,53 @@ export function createFriendStore({
     if (rec.status === 'pending') { rec.status = 'unplayable'; save(); }
   }
 
+  // ---- 问过但没听 ----
+  // Vera 问「要不要听」，对方没回、或回了不听，都落到 dropped：不再自动插播，
+  // 但记录留着——用户问「刚才谁推荐了什么」时还要能说出来，也能 recover 回 pending。
+  function drop(to, recId) {
+    const rec = findFor(check(to), recId);
+    if (rec.status === 'pending') { rec.status = 'dropped'; rec.droppedAt = now(); save(); }
+    return receivedView(rec);
+  }
+
+  // 找回来的那首重新排队（用户说了「那首听听看」）
+  function recover(to, recId) {
+    const rec = findFor(check(to), recId);
+    if (rec.status === 'dropped') {
+      rec.status = 'pending';
+      rec.offeredAt = 0;
+      rec.droppedAt = 0;
+      save();
+    }
+    return receivedView(rec);
+  }
+
+  // 最近被丢弃的几条：Vera 念「谁推了什么」用，也可以拿来恢复
+  // 按丢弃时间排（不是按推荐时间）——用户问的是「刚才」谁推的。
+  function droppedList(to, { days = limits.lostDays } = {}) {
+    check(to);
+    sweep();
+    const t = now();
+    return load().recs
+      .filter((r) => r.to === to && !r.blocked && !isBlocked(to, r.from)
+        && r.status === 'dropped' && t - (r.droppedAt || r.at) < days * DAY)
+      .sort((x, y) => (y.droppedAt || y.at) - (x.droppedAt || x.at))
+      .slice(0, limits.lostMax)
+      .map(receivedView);
+  }
+
   // ---- 给两边看的样子 ----
   const noteFor = (rec) => (rec.noteState === 'ok' ? rec.note : '');
   function deliveryView(rec) {
     return { id: rec.id, from: { id: rec.from, name: nameOf(rec.from) }, song: rec.song, note: noteFor(rec), at: rec.at };
   }
   function receivedView(rec) {
-    return { ...deliveryView(rec), status: rec.status === 'played' ? 'played' : rec.status === 'expired' ? 'expired' : rec.status === 'unplayable' ? 'unplayable' : 'new', liked: rec.liked };
+    const status = rec.status === 'played' ? 'played'
+      : rec.status === 'expired' ? 'expired'
+        : rec.status === 'unplayable' ? 'unplayable'
+          : rec.status === 'dropped' ? 'dropped'
+            : 'new';
+    return { ...deliveryView(rec), status, liked: rec.liked };
   }
   // 发的人看到的：被跳过不给看；被屏蔽的照样「已送达」
   function sentView(rec) {
@@ -424,6 +468,7 @@ export function createFriendStore({
   return {
     seen, nameOf, me, setProfile, createCode, redeem, friends, remove, block, unblock,
     recommend, setNoteVerdict, next, played, like, likeSong, unplayable,
+    drop, recover, droppedList,
     inbox, sent, dayLeft, overview, purge, ids, stats, isFriend: (a, b) => linked(a, b),
   };
 }

@@ -8,7 +8,7 @@ import { NcmBusyError, toHttps } from './ncm-public.js';
 import { HubError } from './hub-client.js';
 import { createMediaProxy } from './media.js';
 import { createMixer, shuffle, songKey } from './mix.js';
-import { createVoice, introLine, recIntro, withNote } from './voice.js';
+import { createVoice, introLine, recAsk as recAskIntro, recIntro, withNote } from './voice.js';
 import { createRecommender, matchFriend, mountFriendRoutes, parseRecText } from './friends-routes.js';
 import { stripTags } from '../tts/tags.js';
 import { oneSentence } from '../drive.js';
@@ -484,7 +484,13 @@ export function createPublicApp({
         return null;
       }
       media.remember(m.id, level, song);
-      return { ...songView({ cover: rec.song.cover, ...song }), rec: { id: rec.id, from: rec.from.name, note: rec.note } };
+      // friendRec 是前端认「这首要问一句」的标记（和个人版 friends-link 的字段同名）；
+      // rec 保留给报幕和旧页面读。
+      return {
+        ...songView({ cover: rec.song.cover, ...song }),
+        rec: { id: rec.id, from: rec.from.name, note: rec.note },
+        friendRec: { id: rec.id, from: rec.from.name },
+      };
     } catch (error) {
       log('friend-rec-skip', m.id, error.code || error.name);
       return null;
@@ -505,7 +511,8 @@ export function createPublicApp({
     const stamp = { at, tier: publicTone({ at }).key, hourKey: hourKeyOf(at, BEIJING) };
     songs.forEach((song, i) => {
       // 好友推荐的歌：模板报幕带上是谁推荐的和附言（附言原样接在后面念，不进大脑）；口播频率再低也报（talk.js 的 recommended）
-      const rec = song.rec ? recIntro({ from: song.rec.from, song, note: song.rec.note }) : null;
+      // 用 recAsk 而不是 recIntro：报完幕要停下来问一句「要听吗」，网页那边等回答（说了听才放，没回应就暂存）。
+      const rec = song.rec ? recAskIntro({ from: song.rec.from, song, note: song.rec.note }) : null;
       const fallback = rec ? rec.speak : introLine(song);
       if (drive && i > 0) return;
       const why = speakReasons(level, { ...talker.context(stamp), recommended: Boolean(rec) });

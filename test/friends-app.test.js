@@ -149,7 +149,7 @@ test('加好友、推荐、插播第一首、报幕带名字和附言、开播�
     assert.equal(batch.songs[0].id, 777);
     assert.equal(batch.songs[0].rec.from, '小王');
     assert.equal(batch.songs[0].rec.note, '下雨天听这个');
-    assert.equal(batch.songs[0].say, '小王给你推荐了周杰伦的《晴天》：「下雨天听这个」');
+    assert.equal(batch.songs[0].say, '小王给你推荐了周杰伦的《晴天》：「下雨天听这个」要听吗？');
     assert.ok(t.calls.includes('id:777:'));
     assert.match(ttsCalls.at(-1), /小王给你推荐了《晴天》.*小王留了句话：下雨天听这个/);
     // 下一批不再插（隔 10 分钟）
@@ -186,7 +186,7 @@ test('附言大脑判不过 / 判不了：只推荐歌，收的人看不到、�
       assert.equal((await t.req('/api/friends', { cookie: a })).data.sent[0].noteState, 'rejected');
       const batch = (await t.req('/api/chat', { body: { text: '' }, cookie: b })).data;
       assert.equal(batch.songs[0].rec.note, '');
-      assert.equal(batch.songs[0].say, '小王给你推荐了某的《歌五》。');
+      assert.equal(batch.songs[0].say, '小王给你推荐了某的《歌五》。要听吗？');
       assert.ok(!ttsCalls.at(-1).includes('一句话'));
     } finally { t.close(); }
   }
